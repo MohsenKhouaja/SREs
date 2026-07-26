@@ -1,0 +1,180 @@
+name: wayfinder
+
+services:
+  backend:
+    build: ./backend
+    ports: ["${BACKEND_HOST_PORT:-8000}:8000"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LLM_PROVIDER: ${LLM_PROVIDER:-deterministic}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-wayfinder-incident-response}
+      MONGODB_URL: mongodb://mongodb:27017
+      MONGODB_DATABASE: incident_response
+      PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100
+      SAMPLE_API_URL: http://sample-api:8001
+      SAMPLE_PAYMENT_URL: http://sample-payment:8002
+      SIMULATION_WARMUP_SECONDS: ${SIMULATION_WARMUP_SECONDS:-10}
+    depends_on:
+      mongodb: {condition: service_healthy}
+      prometheus: {condition: service_healthy}
+      loki: {condition: service_healthy}
+      sample-api: {condition: service_healthy}
+      sample-payment: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [incident-response-net]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports: ["${FRONTEND_HOST_PORT:-3000}:3000"]
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [incident-response-net]
+
+  prometheus:
+    image: prom/prometheus:latest
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    ports: ["${PROMETHEUS_HOST_PORT:-9090}:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [incident-response-net]
+
+  loki:
+    image: grafana/loki:latest
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports: ["${LOKI_HOST_PORT:-3100}:3100"]
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    healthcheck:
+      # The official Loki image is intentionally minimal and does not ship
+      # curl/wget. A successful version probe plus Docker's running-state check
+      # gives dependants a portable readiness gate without a custom image.
+      test: ["CMD", "/usr/bin/loki", "-version"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    networks: [incident-response-net]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["${REDIS_HOST_PORT:-6379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [incident-response-net]
+
+  postgres:
+    image: postgres:16-alpine
+    ports: ["${POSTGRES_HOST_PORT:-5432}:5432"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: incident_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d incident_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [incident-response-net]
+
+  mongodb:
+    image: mongo:7
+    ports: ["${MONGODB_HOST_PORT:-27017}:27017"]
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [incident-response-net]
+
+  sample-api:
+    build: ./sample-apps
+    ports: ["${SAMPLE_API_HOST_PORT:-8001}:8001"]
+    environment:
+      SERVICE_KIND: api
+      PORT: 8001
+      REDIS_URL: redis://redis:6379
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/incident_db
+      LOKI_URL: http://loki:3100
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      loki: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [incident-response-net]
+
+  sample-payment:
+    build: ./sample-apps
+    ports: ["${SAMPLE_PAYMENT_HOST_PORT:-8002}:8002"]
+    environment:
+      SERVICE_KIND: payment
+      PORT: 8002
+      REDIS_URL: redis://redis:6379
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/incident_db
+      LOKI_URL: http://loki:3100
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      loki: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [incident-response-net]
+
+volumes:
+  prometheus-data:
+  loki-data:
+  mongodb-data:
+  postgres-data:
+
+networks:
+  incident-response-net:
+    name: incident-response-net
