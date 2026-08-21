@@ -13,3 +13,4 @@ frontend/tsconfig.tsbuildinfo
 .scratch/
 chat.txt
 .DS_Store
+lessons/
