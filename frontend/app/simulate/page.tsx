@@ -34,7 +34,7 @@ export default function SimulatePage() {
   }
 
   return <>
-    <PageHeader title="Simulation control" description="Introduce one controlled failure, then let Wayfinder investigate live observability data." actions={<Button onClick={recover} disabled={!!active}><RotateCcw size={16} aria-hidden="true" />{active === "recover" ? "Recovering…" : "Recover all"}</Button>} />
+    <PageHeader title="Simulation control" description="Introduce one controlled failure, then let SREs investigate live observability data." actions={<Button onClick={recover} disabled={!!active}><RotateCcw size={16} aria-hidden="true" />{active === "recover" ? "Recovering…" : "Recover all"}</Button>} />
     {error && <p className="error-message" role="alert">{error}</p>}
     <div className="scenario-list">{scenarios.map(({id, title, service, description, impact, icon: Icon}) => <section className="scenario-row" key={id}><div className="scenario-icon"><Icon size={20} aria-hidden="true" /></div><div className="scenario-copy"><h2>{title}</h2><span>{service} · {description}</span></div><p className="scenario-impact">{impact}</p><Button variant="primary" disabled={!!active} onClick={() => trigger(id)}>{active === id ? "Starting…" : "Trigger"}</Button></section>)}</div>
     <div className="section-title"><h2>Environment health</h2><p>Updated every eight seconds</p></div>

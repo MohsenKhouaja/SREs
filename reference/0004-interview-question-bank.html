@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SREs interview question bank</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><div class="page">
+  <header class="masthead"><div><p class="eyebrow">SREs reference 0004</p><h1>Interview question bank</h1><p class="dek">Thirty project-specific prompts. Answer aloud, then use the hint only to audit omissions.</p></div><div class="lesson-meta"><strong>Rule</strong>Claim → code evidence → trade-off. Never answer with framework slogans.</div></header>
+  <main class="question-bank">
+    <section><h2>System narrative</h2>
+      <div class="question"><strong>Walk me through one Investigation end to end.</strong><p>Hit: failure toggle, durable creation, background graph, fan-out/join, Approval interrupt, branch, Report, SSE.</p></div>
+      <div class="question"><strong>Why does the start route return 202?</strong><p>The request accepts long-running work; completion arrives later through records/polling/events.</p></div>
+      <div class="question"><strong>Where is the system boundary?</strong><p>Control plane investigates a bundled, controlled lab; no arbitrary host or Docker control.</p></div>
+      <div class="question"><strong>Why are there nine services?</strong><p>Separate UX/API/persistence, observability, sample dependencies, and two instrumented services.</p></div>
+    </section>
+    <section><h2>Agents and orchestration</h2>
+      <div class="question"><strong>What makes an Agent an Agent here?</strong><p>A specialist graph node with narrow state/tool responsibility—not an autonomous chatbot.</p></div>
+      <div class="question"><strong>How does fan-out and join work?</strong><p>Three START edges run collectors; a multi-source edge gates Correlation until all finish.</p></div>
+      <div class="question"><strong>Why do list fields use reducers?</strong><p>Parallel partial updates append rather than overwrite sibling Findings and steps.</p></div>
+      <div class="question"><strong>What does RetryPolicy actually retry?</strong><p>Thrown node exceptions; tool wrappers usually catch failures and return error envelopes instead.</p></div>
+      <div class="question"><strong>Could this be a conventional workflow?</strong><p>Yes; explain why explicit state, checkpoints, branches, and observability still fit graph orchestration.</p></div>
+    </section>
+    <section><h2>Evidence and AI</h2>
+      <div class="question"><strong>Is the root cause really AI-generated?</strong><p>Not necessarily. Deterministic profiles and heuristic tools work without a key; the LLM refines one sentence.</p></div>
+      <div class="question"><strong>Which evidence is real and which is synthetic?</strong><p>Loki/Prometheus query generated telemetry; Event Agent creates a two-event in-process timeline.</p></div>
+      <div class="question"><strong>How are hypotheses ranked?</strong><p>Textual term overlap with serialized evidence, starting at .35 and adding .16 per match.</p></div>
+      <div class="question"><strong>What happens when Loki is unavailable?</strong><p>The tool returns structured error data; the collector still creates a profile-worded Finding.</p></div>
+      <div class="question"><strong>What can the LLM change?</strong><p>Only root-cause wording; not graph topology, approval, targets, payloads, or execution.</p></div>
+    </section>
+    <section><h2>Safety and state</h2>
+      <div class="question"><strong>Why is the interrupt node pure?</strong><p>Resume re-enters the node; placing writes/actions afterward avoids duplicate side effects on replay.</p></div>
+      <div class="question"><strong>How do you prove rejection cannot remediate?</strong><p>Conditional edge routes rejected to <code>rejected</code>; only approved reaches <code>execute</code>.</p></div>
+      <div class="question"><strong>Why are Store and checkpointer separate?</strong><p>Product query model versus graph continuation state; each serves a different consumer.</p></div>
+      <div class="question"><strong>Is SSE the source of truth?</strong><p>No. It is process-local immediacy; GET endpoints reconstruct from Store records.</p></div>
+      <div class="question"><strong>What survives a backend restart?</strong><p>Mongo records/checkpoints and named-volume telemetry; tasks and EventHub memory do not.</p></div>
+    </section>
+    <section><h2>API and frontend</h2>
+      <div class="question"><strong>Why use polling and SSE together?</strong><p>Polling refreshes durable aggregate state; SSE gives low-latency activity events.</p></div>
+      <div class="question"><strong>How are dependencies injected for tests?</strong><p><code>create_app</code> accepts Settings and Store; lifespan selects in-memory checkpointing.</p></div>
+      <div class="question"><strong>How are secrets handled?</strong><p>POST accepts a key into process memory; responses expose only a configured boolean, not the value.</p></div>
+      <div class="question"><strong>How does the UI reflect product stages?</strong><p>Separate Simulate, Investigation, Approval, and Report routes preserve one narrative.</p></div>
+    </section>
+    <section><h2>Testing and critique</h2>
+      <div class="question"><strong>What does the workflow test prove?</strong><p>Fan-out completion, pending Approval, checkpoint resume, rejection terminal state, and no need for external services.</p></div>
+      <div class="question"><strong>What important behavior is untested?</strong><p>Real Compose integration, SSE replay/disconnects, concurrent decisions, approved remediation, restart recovery, model providers.</p></div>
+      <div class="question"><strong>Name the highest-risk race.</strong><p>Two decision requests can both observe pending before asynchronous resume persists the first decision.</p></div>
+      <div class="question"><strong>What would break at multiple backend replicas?</strong><p>Process-local tasks/EventHub and uncoordinated duplicate checks; clients may connect to another replica.</p></div>
+      <div class="question"><strong>What is misleading about completed remediation?</strong><p>Execution errors are captured, but Report still marks the Investigation completed without post-action verification.</p></div>
+      <div class="question"><strong>What would you improve first?</strong><p>Auth and atomic decision claiming, durable job recovery, verified remediation, evidence validity, then scalable event delivery.</p></div>
+      <div class="question"><strong>How would you productionize safely?</strong><p>Keep human policy, add identity/RBAC/audit, idempotency, leases, durable queues, bounded events, verification, and real integrations.</p></div>
+    </section>
+  </main>
+  <footer class="footer"><a href="../lessons/index.html">Course index</a> · Use after <a href="../lessons/0014-defend-and-critique.html">Lesson 14</a>. Ask your teaching agent to conduct a randomized mock interview from this bank.</footer>
+</div></body></html>

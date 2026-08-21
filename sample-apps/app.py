@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
         await app.state.postgres.close()
 
 
-app = FastAPI(title=f"Wayfinder sample {SERVICE_NAME}", lifespan=lifespan)
+app = FastAPI(title=f"SREs sample {SERVICE_NAME}", lifespan=lifespan)
 
 
 @app.middleware("http")

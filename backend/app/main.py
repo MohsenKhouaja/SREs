@@ -47,7 +47,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if checkpoint_client is not None:
             checkpoint_client.close()
 
-    app = FastAPI(title="Wayfinder Incident Response API", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="SREs Incident Response API", version="1.0.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000", "http://frontend:3000"],

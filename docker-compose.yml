@@ -1,4 +1,4 @@
-name: wayfinder
+name: sres
 
 services:
   backend:
@@ -12,7 +12,7 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-wayfinder-incident-response}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-sres-incident-response}
       MONGODB_URL: mongodb://mongodb:27017
       MONGODB_DATABASE: incident_response
       PROMETHEUS_URL: http://prometheus:9090

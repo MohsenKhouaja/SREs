@@ -25,17 +25,17 @@ function SystemIndicator() {
 export function AppShell({children}: {children: ReactNode}) {
   const pathname = usePathname();
   const active = navigation.find((item) => item.href === "/" ? pathname === "/" : pathname.startsWith(item.href));
-  const routeTitle = pathname.startsWith("/investigation/") ? "Investigation detail" : active?.label || "Wayfinder";
+  const routeTitle = pathname.startsWith("/investigation/") ? "Investigation detail" : active?.label || "SREs";
   return <div className="app-shell">
     <aside className="sidebar">
-      <Link href="/" className="brand" aria-label="Wayfinder home"><span className="brand-mark"><ShieldAlert size={19} aria-hidden="true" /></span><span><strong>Wayfinder</strong><small>Incident response</small></span></Link>
+      <Link href="/" className="brand" aria-label="SREs home"><span className="brand-mark"><ShieldAlert size={19} aria-hidden="true" /></span><span><strong>SREs</strong><small>Incident response</small></span></Link>
       <nav aria-label="Primary navigation">
         {navigation.map(({href, label, icon: Icon}) => <Link key={href} href={href} className={clsx("nav-link", (href === "/" ? pathname === "/" : pathname.startsWith(href)) && "is-active")}><Icon size={18} aria-hidden="true" /><span>{label}</span></Link>)}
       </nav>
       <div className="sidebar-note"><span className="live-pulse" aria-hidden="true" /><span>Evidence streams live</span></div>
     </aside>
     <div className="app-frame">
-      <header className="topbar"><div><span className="breadcrumb">Wayfinder /</span> {routeTitle}</div><SystemIndicator /></header>
+      <header className="topbar"><div><span className="breadcrumb">SREs /</span> {routeTitle}</div><SystemIndicator /></header>
       <main id="main-content">{children}</main>
     </div>
   </div>;

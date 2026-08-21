@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SREs · Complete project course</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+  <div class="page">
+    <header class="masthead curriculum-header">
+      <div>
+        <p class="eyebrow">Complete project course</p>
+        <h1>Understand SREs from first click to hard questions</h1>
+        <p class="dek">Fourteen short lessons, ordered for a CRUD engineer entering agent systems. Every claim points back to this repository.</p>
+      </div>
+      <div class="lesson-meta"><strong>Mission</strong>Explain, trace, critique, and defend SREs in a technical interview.</div>
+    </header>
+
+    <p class="curriculum-intro">Study in order. Do the retrieval check before revealing each model answer. Marking a lesson complete is local to this browser and is not evidence of mastery; your teach-back answers are.</p>
+    <p class="progress-summary" data-progress-summary>0 of 14 lessons marked complete</p>
+
+    <main class="course-grid">
+      <a class="course-card" href="0001-trace-an-incident.html"><span class="number">LESSON 01</span><h2>Trace one Incident</h2><p>Follow the operator's click through fan-out, approval, remediation, and Report.</p><span class="duration">12 min · system narrative</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0001"> Mark complete</label></a>
+      <a class="course-card" href="0002-map-the-system.html"><span class="number">LESSON 02</span><h2>Map the nine-service lab</h2><p>Separate the control plane, observability plane, and controlled system under investigation.</p><span class="duration">10 min · topology</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0002"> Mark complete</label></a>
+      <a class="course-card" href="0003-read-incident-state.html"><span class="number">LESSON 03</span><h2>Read IncidentState</h2><p>Understand partial updates, reducers, field ownership, and why parallel lists do not overwrite.</p><span class="duration">12 min · state model</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0003"> Mark complete</label></a>
+      <a class="course-card" href="0004-read-the-graph.html"><span class="number">LESSON 04</span><h2>Read the graph</h2><p>Translate nodes, edges, fan-out, join, conditional routing, retries, and tasks into runtime behavior.</p><span class="duration">12 min · orchestration</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0004"> Mark complete</label></a>
+      <a class="course-card" href="0005-follow-the-evidence.html"><span class="number">LESSON 05</span><h2>Follow the Evidence</h2><p>Trace real Loki and Prometheus calls, structured tool envelopes, timeline construction, and unused capabilities.</p><span class="duration">14 min · tools</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0005"> Mark complete</label></a>
+      <a class="course-card" href="0006-bound-the-llm.html"><span class="number">LESSON 06</span><h2>Bound the LLM</h2><p>Show exactly where a model can influence the system—and everything it cannot control.</p><span class="duration">9 min · AI boundary</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0006"> Mark complete</label></a>
+      <a class="course-card" href="0007-prove-approval-safety.html"><span class="number">LESSON 07</span><h2>Prove approval safety</h2><p>Explain checkpoint, interrupt, resume, pure gates, side-effect placement, and both terminal branches.</p><span class="duration">13 min · human control</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0007"> Mark complete</label></a>
+      <a class="course-card" href="0008-separate-three-state-systems.html"><span class="number">LESSON 08</span><h2>Separate three state systems</h2><p>Distinguish product records, graph checkpoints, and process-local live events.</p><span class="duration">12 min · persistence</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0008"> Mark complete</label></a>
+      <a class="course-card" href="0009-walk-the-api.html"><span class="number">LESSON 09</span><h2>Walk the backend API</h2><p>Read application lifespan, dependency wiring, HTTP contracts, background work, errors, and SSE.</p><span class="duration">14 min · backend boundary</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0009"> Mark complete</label></a>
+      <a class="course-card" href="0010-explain-the-frontend.html"><span class="number">LESSON 10</span><h2>Explain the frontend</h2><p>Connect routes, SWR polling, EventSource updates, stage-specific UX, types, and accessibility intent.</p><span class="duration">13 min · browser behavior</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0010"> Mark complete</label></a>
+      <a class="course-card" href="0011-generate-telemetry.html"><span class="number">LESSON 11</span><h2>Generate the telemetry</h2><p>See exactly how the two sample services manufacture each failure's logs and metrics.</p><span class="duration">12 min · controlled incidents</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0011"> Mark complete</label></a>
+      <a class="course-card" href="0012-run-the-stack.html"><span class="number">LESSON 12</span><h2>Run the stack</h2><p>Understand Compose DNS, health gates, ports, volumes, images, environment settings, and commands.</p><span class="duration">11 min · operations</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0012"> Mark complete</label></a>
+      <a class="course-card" href="0013-read-the-tests.html"><span class="number">LESSON 13</span><h2>Read the tests as contracts</h2><p>Identify what the suite proves, its test doubles and seams, and its important blind spots.</p><span class="duration">12 min · verification</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0013"> Mark complete</label></a>
+      <a class="course-card" href="0014-defend-and-critique.html"><span class="number">LESSON 14</span><h2>Defend and critique</h2><p>Give the architectural pitch, name concrete limitations, propose prioritized improvements, and face interview drills.</p><span class="duration">20 min · capstone</span><label class="progress-control" onclick="event.preventDefault(); event.stopPropagation()"><input type="checkbox" data-progress="0014"> Mark complete</label></a>
+    </main>
+
+    <section class="callout interview"><p><strong>How to use this course:</strong> reading creates familiarity; retrieval creates interview readiness. After each lesson, send your teach-back answer to your teaching agent for grading. Ask follow-up questions whenever a code claim is unclear.</p></section>
+
+    <footer class="footer">References: <a href="../reference/0001-sres-glossary.html">glossary</a> · <a href="../reference/0002-system-and-code-map.html">system and code map</a> · <a href="../reference/0003-state-and-api-cheatsheet.html">state and API cheatsheet</a> · <a href="../reference/0004-interview-question-bank.html">interview question bank</a></footer>
+  </div>
+  <script src="../assets/progress.js"></script>
+</body>
+</html>

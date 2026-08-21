@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lesson 1 · Trace one SREs incident</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+  <div class="page">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">SREs · Lesson 0001</p>
+        <h1>Trace one incident to the approval gate</h1>
+        <p class="dek">Your first win: explain what actually happens after an operator clicks <strong>Trigger</strong>—without hiding behind “the AI handles it.”</p>
+      </div>
+      <div class="lesson-meta">
+        <strong>Target time</strong>12 minutes
+        <strong style="margin-top: 12px">You will be able to</strong>Give a precise 60-second architecture walkthrough
+      </div>
+    </header>
+
+    <div class="layout">
+      <main>
+        <section id="anchor">
+          <p class="eyebrow">The anchor</p>
+          <h2>One sentence first</h2>
+          <div class="callout">
+            <p><strong>SREs deliberately breaks a sample service, collects three kinds of evidence in parallel, correlates them into a proposed root cause and remediation, pauses for a human decision, then either performs the controlled recovery or closes without action, and finally stores a report.</strong></p>
+          </div>
+          <p>That sentence is the whole product. Every important file exists to make one part of it happen safely, visibly, or durably.</p>
+          <p><a href="../reference/0001-sres-glossary.html">Open the project glossary</a> whenever an Incident, Investigation, Finding, Evidence, Approval, or Remediation term feels interchangeable. In SREs, they are not.</p>
+        </section>
+
+        <section id="bridge">
+          <p class="eyebrow">Bridge from CRUD</p>
+          <h2>The request returns before the work ends</h2>
+          <div class="bridge">
+            <div class="bridge-card">
+              <h3>A familiar CRUD request</h3>
+              <p>Browser sends request → route validates → service reads or writes → database commits → response returns.</p>
+            </div>
+            <div class="bridge-arrow" aria-hidden="true">→</div>
+            <div class="bridge-card">
+              <h3>This Investigation request</h3>
+              <p>Browser sends request → API creates a record and background task → response returns <code>202</code> with an ID → workflow continues and streams progress.</p>
+            </div>
+          </div>
+          <p>The shift is not “CRUD versus AI.” The shift is <strong>short request/response work versus a long-lived, stateful execution</strong> that must pause and later resume.</p>
+        </section>
+
+        <section id="trace">
+          <p class="eyebrow">The execution trace</p>
+          <h2>Follow the bad-deployment scenario</h2>
+          <ol class="flow">
+            <li>
+              <h3>The UI starts the Scenario</h3>
+              <p>The Simulate screen posts <code>{auto_start_investigation: true}</code>, receives an Investigation ID, and navigates to its live page.</p>
+              <a class="source" href="../frontend/app/simulate/page.tsx">Source: simulate/page.tsx · trigger()</a>
+            </li>
+            <li>
+              <h3>The API first creates the failure</h3>
+              <p>For <code>bad-deployment</code>, it tells both sample services to switch to broken <code>v2</code> behavior. Then it creates the durable Investigation and five waiting agent records.</p>
+              <a class="source" href="../backend/app/main.py">Source: main.py · simulate() and _trigger_failure()</a>
+            </li>
+            <li>
+              <h3>The API starts background execution</h3>
+              <p><code>workflow.start()</code> creates an asynchronous task, while the route returns <code>202</code>. After a telemetry warm-up, the task invokes the graph with a fresh <code>IncidentState</code>.</p>
+              <a class="source" href="../backend/app/workflow.py">Source: workflow.py · start() and _run_initial()</a>
+            </li>
+            <li>
+              <h3>Three collectors fan out</h3>
+              <p>Log queries Loki, Metrics queries Prometheus, and Event builds a causal timeline. They start from the same graph state and each returns only its own Findings.</p>
+              <a class="source" href="../backend/app/workflow.py">Source: workflow.py · _build_graph(), _log_agent(), _metrics_agent(), _event_agent()</a>
+            </li>
+            <li>
+              <h3>Correlation waits for all three</h3>
+              <p>The join edge prevents Correlation from running early. It reads all Findings, ranks fixed hypotheses, chooses project-specific fallback wording, optionally asks one configured model to refine only the root-cause sentence, and creates a pending Approval.</p>
+              <a class="source" href="../backend/app/workflow.py">Source: workflow.py · _correlation_agent()</a>
+            </li>
+            <li>
+              <h3>The graph stops at a pure approval gate</h3>
+              <p><code>interrupt()</code> checkpoints the run and returns control. The node itself writes no decision and performs no remediation, so replaying it cannot duplicate an external side effect.</p>
+              <a class="source" href="../backend/app/workflow.py">Source: workflow.py · _approval_node()</a>
+            </li>
+            <li>
+              <h3>The operator chooses the only risky branch</h3>
+              <p>The approval screen posts approve or reject. The backend resumes the same checkpoint. Approval reaches <code>execute</code> and switches both services to <code>v1</code>; rejection reaches a separate report path that never executes remediation.</p>
+              <a class="source" href="../frontend/app/approvals/%5Bid%5D/page.tsx">Source: approvals/[id]/page.tsx · decide()</a>
+            </li>
+            <li>
+              <h3>A durable Report closes the Investigation</h3>
+              <p>Both branches produce a Report. The approved path includes execution results; the rejected path explicitly says that no operational action ran.</p>
+              <a class="source" href="../backend/app/workflow.py">Source: workflow.py · _report_agent() and _rejected_report()</a>
+            </li>
+          </ol>
+        </section>
+
+        <section id="agents">
+          <p class="eyebrow">Remove the magic</p>
+          <h2>What “agent” means in this codebase</h2>
+          <p>Each user-visible Agent is a narrow application function registered as a graph node. The graph—not an LLM—decides their execution order. Log, Metrics, and Event perform predefined operations. Correlation has predefined hypotheses and deterministic scenario fallbacks. A configured LLM can refine one sentence, but failure falls back safely.</p>
+          <div class="callout interview">
+            <p><strong>Interview distinction:</strong> SREs is best described as a deterministic, stateful orchestration with specialist agent-shaped nodes and optional LLM-assisted phrasing. It is not a collection of autonomous models freely choosing tools and delegating work.</p>
+          </div>
+          <p>This distinction is supported by <a href="../backend/app/workflow.py"><code>workflow.py</code></a>, where nodes and edges are registered explicitly, and <a href="../backend/app/llm.py"><code>llm.py</code></a>, where disabled or failed model calls return the deterministic fallback.</p>
+        </section>
+
+        <section id="state-lanes">
+          <p class="eyebrow">Interview-grade detail</p>
+          <h2>Three kinds of state serve three jobs</h2>
+          <div class="lanes">
+            <div class="lane"><h3>Product records</h3><p>Investigations, agent states, approvals, and reports live behind <code>Store</code>. MongoDB is normal runtime storage; memory is used in tests.</p></div>
+            <div class="lane"><h3>Graph checkpoint</h3><p>The checkpointer preserves the paused execution position and graph state. The Investigation ID is also the graph <code>thread_id</code>.</p></div>
+            <div class="lane"><h3>Live event stream</h3><p><code>EventHub</code> feeds immediate SSE updates to connected browsers. It is process-local and is not the durable source of truth.</p></div>
+          </div>
+          <p>A page refresh can reconstruct the Investigation from product records. A resume needs the graph checkpoint. A smooth live UI uses the event stream. Those are related, but they are not substitutes.</p>
+        </section>
+
+        <section id="read-code">
+          <p class="eyebrow">Primary-source practice</p>
+          <h2>Read only these slices now</h2>
+          <p>The primary source for this lesson is the short workflow test. It states the externally important behavior without framework noise.</p>
+          <ol class="code-trail">
+            <li><span class="trail-number">01</span><div><a href="../backend/tests/test_workflow.py"><strong>backend/tests/test_workflow.py</strong></a><p>Read the first test. Predict each assertion before moving to its next line.</p></div></li>
+            <li><span class="trail-number">02</span><div><a href="../backend/app/workflow.py"><strong>workflow.py lines 77–99</strong></a><p>Translate every edge into one spoken sentence. Find the one branch that can reach remediation.</p></div></li>
+            <li><span class="trail-number">03</span><div><a href="../backend/app/workflow.py"><strong>workflow.py lines 229–302</strong></a><p>Locate where evidence becomes an Approval, where execution pauses, and where the decision becomes a branch.</p></div></li>
+          </ol>
+        </section>
+
+        <section id="check">
+          <p class="eyebrow">Retrieval check</p>
+          <h2>Answer without scrolling up</h2>
+
+          <div class="quiz" data-quiz data-answer="b" data-correct="The backend owns the long-running graph and exposes its state to the browser." data-incorrect="Trace the Trigger button: the browser starts and observes the run, while the backend coordinates it.">
+            <fieldset>
+              <legend>Who coordinates the Investigation after the initial HTTP response?</legend>
+              <label class="quiz-option"><input type="radio" name="q1" value="a"> The browser calls Loki directly</label>
+              <label class="quiz-option"><input type="radio" name="q1" value="b"> The backend coordinates the investigation</label>
+              <label class="quiz-option"><input type="radio" name="q1" value="c"> MongoDB generates the root cause</label>
+            </fieldset>
+            <button type="button">Check answer</button>
+            <p class="quiz-feedback" data-feedback aria-live="polite"></p>
+          </div>
+
+          <div class="quiz" data-quiz data-answer="b" data-correct="The join edge makes Correlation wait for Log, Metrics, and Event findings." data-incorrect="Look at the three START edges and the multi-source edge leading into Correlation.">
+            <fieldset>
+              <legend>When can the Correlation Agent run?</legend>
+              <label class="quiz-option"><input type="radio" name="q2" value="a"> Before any evidence is collected</label>
+              <label class="quiz-option"><input type="radio" name="q2" value="b"> After all collectors finish gathering</label>
+              <label class="quiz-option"><input type="radio" name="q2" value="c"> After the report is completed</label>
+            </fieldset>
+            <button type="button">Check answer</button>
+            <p class="quiz-feedback" data-feedback aria-live="polite"></p>
+          </div>
+
+          <div class="quiz" data-quiz data-answer="b" data-correct="Only an operator decision can route the graph to the remediation node." data-incorrect="The model may refine wording; it never grants permission to execute the recovery.">
+            <fieldset>
+              <legend>Who authorizes the controlled remediation?</legend>
+              <label class="quiz-option"><input type="radio" name="q3" value="a"> The model controls every decision</label>
+              <label class="quiz-option"><input type="radio" name="q3" value="b"> The operator controls risky remediation</label>
+              <label class="quiz-option"><input type="radio" name="q3" value="c"> Prometheus controls every workflow branch</label>
+            </fieldset>
+            <button type="button">Check answer</button>
+            <p class="quiz-feedback" data-feedback aria-live="polite"></p>
+          </div>
+        </section>
+
+        <section id="teach-back" class="teach-back">
+          <p class="eyebrow">Storage-strength exercise</p>
+          <h2>Give the 60-second interview answer</h2>
+          <p>Without looking back, answer: <em>“What happens end-to-end when a user runs the bad-deployment scenario?”</em> Include the trigger, parallel collectors, join, approval pause, both decision branches, and final report.</p>
+          <textarea aria-label="Your teach-back answer" placeholder="Write or speak your answer before revealing the model…"></textarea>
+          <details>
+            <summary>Reveal a strong model answer</summary>
+            <div class="answer-model">The frontend posts the bad-deployment Scenario to the backend. The backend switches both sample services to broken v2 behavior, creates durable Investigation and agent records, starts a background graph task, and returns the Investigation ID. Log, Metrics, and Event nodes then collect Loki, Prometheus, and timeline Findings in parallel; a join ensures Correlation sees all three streams. Correlation ranks hypotheses, establishes a root cause, creates a pending remediation Approval, and the graph checkpoints and pauses. An operator decision resumes that same graph: approval routes to the controlled v2-to-v1 rollback, while rejection routes directly to a no-action report. Either branch ends by persisting a Report and publishing live status events to the UI.</div>
+          </details>
+        </section>
+
+        <section id="next">
+          <p class="eyebrow">Next lesson gate</p>
+          <h2>Do not memorize framework vocabulary yet</h2>
+          <p>When you can give the teach-back answer without looking, the next lesson should explain <strong>how <code>IncidentState</code> makes parallel fan-out and join safe</strong>. That is the first place where SREs differs sharply from a conventional mutable service object.</p>
+        </section>
+      </main>
+
+      <nav class="side-nav" aria-label="Lesson sections">
+        <strong>In this lesson</strong>
+        <a href="#anchor">One-sentence system</a>
+        <a href="#bridge">Bridge from CRUD</a>
+        <a href="#trace">Execution trace</a>
+        <a href="#agents">What agent means</a>
+        <a href="#state-lanes">Three state lanes</a>
+        <a href="#read-code">Read the code</a>
+        <a href="#check">Retrieval check</a>
+        <a href="#teach-back">Teach it back</a>
+      </nav>
+    </div>
+
+    <footer class="footer">
+      <strong>Questions are part of the lesson.</strong> Ask your teaching agent about any sentence, code path, or quiz answer that is unclear. When ready, send your 60-second teach-back answer for grading before moving on.
+    </footer>
+  </div>
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>

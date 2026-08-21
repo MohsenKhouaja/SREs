@@ -1,19 +1,19 @@
 <div align="center">
 
-# Wayfinder
+# SREs
 
 ### An evidence-first incident response agent built with LangGraph
 
-Wayfinder turns a controlled service failure into a traceable investigation: specialist agents inspect logs, metrics, and events in parallel; a correlation agent proposes a root cause; a human approves or rejects remediation; and a report agent preserves the full decision trail.
+SREs turns a controlled service failure into a traceable investigation: specialist agents inspect logs, metrics, and events in parallel; a correlation agent proposes a root cause; a human approves or rejects remediation; and a report agent preserves the full decision trail.
 
 [Quick start](#quick-start) · [Agent workflow](#agent-workflow) · [Architecture](#system-architecture) · [API](#api-walkthrough) · [Tests](#testing)
 
 </div>
 
 > [!NOTE]
-> Wayfinder is a local SRE laboratory. It only changes failure flags inside the bundled sample services. It does not mount the Docker socket or operate arbitrary host infrastructure.
+> SREs is a local SRE laboratory. It only changes failure flags inside the bundled sample services. It does not mount the Docker socket or operate arbitrary host infrastructure.
 
-## What Wayfinder demonstrates
+## What SREs demonstrates
 
 - **Parallel evidence collection** — Log, Metrics, and Event agents fan out from a shared `IncidentState` and join before correlation.
 - **Grounded analysis** — findings retain their timestamp, source, message, and raw Loki or Prometheus response.
@@ -25,7 +25,7 @@ Wayfinder turns a controlled service failure into a traceable investigation: spe
 
 ## Agent workflow
 
-Wayfinder uses five user-visible specialist agents. LangGraph also contains control nodes for the approval gate, decision recording, and remediation execution.
+SREs uses five user-visible specialist agents. LangGraph also contains control nodes for the approval gate, decision recording, and remediation execution.
 
 ```mermaid
 flowchart TD
@@ -206,7 +206,7 @@ docker compose up --build
 
 Compose builds the application containers, waits for their dependencies to become healthy, and starts all nine services. The sample services need a few seconds to generate enough telemetry for an investigation.
 
-### 3. Open Wayfinder
+### 3. Open SREs
 
 | Service | URL |
 | --- | --- |
@@ -236,7 +236,7 @@ Edit `.env` before starting Compose.
 | `GEMINI_API_KEY` | empty | Enables Gemini-assisted root-cause phrasing |
 | `LANGSMITH_TRACING` | `false` | Enables LangSmith tracing when set to `true` |
 | `LANGSMITH_API_KEY` | empty | Authenticates LangSmith tracing |
-| `LANGSMITH_PROJECT` | `wayfinder-incident-response` | LangSmith project name |
+| `LANGSMITH_PROJECT` | `sres-incident-response` | LangSmith project name |
 | `SIMULATION_WARMUP_SECONDS` | `10` | Telemetry warm-up before graph execution |
 | `FRONTEND_HOST_PORT` | `3000` | Dashboard host port |
 | `BACKEND_HOST_PORT` | `8000` | API host port |
@@ -259,7 +259,7 @@ For observability in LangSmith:
 ```dotenv
 LANGSMITH_TRACING=true
 LANGSMITH_API_KEY=your-key
-LANGSMITH_PROJECT=wayfinder-incident-response
+LANGSMITH_PROJECT=sres-incident-response
 ```
 
 ## API walkthrough

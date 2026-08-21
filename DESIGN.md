@@ -1,4 +1,4 @@
-# Wayfinder Design System
+# SREs Design System
 
 ## Direction
 
@@ -15,7 +15,7 @@ Use a restrained light palette in OKLCH.
 - Accent: a quiet mineral blue for live/system context; use it sparingly.
 - Semantic colors: green, amber, red, and blue remain reserved for explicit state and always pair with text and an icon/marker.
 
-Avoid decorative gradients. When a screen benefits from atmosphere, use `frontend/public/art/wayfinder-atmosphere.png`: a quiet, long-exposure landscape texture in mineral gray, moss, and muted earth. Treat it like Plane treats environmental photography—as a restrained frame for the product surface, never the subject itself.
+Avoid decorative gradients. When a screen benefits from atmosphere, use `frontend/public/art/sres-atmosphere.png`: a quiet, long-exposure landscape texture in mineral gray, moss, and muted earth. Treat it like Plane treats environmental photography—as a restrained frame for the product surface, never the subject itself.
 
 ## Typography
 

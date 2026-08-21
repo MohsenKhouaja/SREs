@@ -24,7 +24,7 @@ export function JournalIndex({items, usingSamples}: {items: Investigation[]; usi
     </header>
 
     <section className="journal-lead" aria-labelledby="journal-lead-title">
-      <div className="journal-art"><img src="/art/wayfinder-atmosphere.png" alt="" /></div>
+      <div className="journal-art"><img src="/art/sres-atmosphere.png" alt="" /></div>
       <div className="journal-lead-copy">
         <div className="prototype-section-label"><span>Current briefing</span><Radio size={14} aria-hidden="true" /></div>
         <h2 id="journal-lead-title">{formatScenario(lead.scenario)}</h2>
@@ -57,7 +57,7 @@ export function FocusedBriefing({items, usingSamples}: {items: Investigation[]; 
 
     <div className="briefing-layout">
       <section className="briefing-focus" aria-labelledby="briefing-focus-title">
-        <div className="briefing-art"><img src="/art/wayfinder-atmosphere.png" alt="" /></div>
+        <div className="briefing-art"><img src="/art/sres-atmosphere.png" alt="" /></div>
         <div className="briefing-focus-copy">
           <div className="prototype-section-label"><span>{usingSamples ? "Preview focus" : "Needs attention"}</span><Clock3 size={14} /></div>
           <h2 id="briefing-focus-title">{formatScenario(active.scenario)}</h2>
@@ -101,7 +101,7 @@ export function EvidenceDesk({items, usingSamples}: {items: Investigation[]; usi
       </section>
 
       <article className="desk-dossier">
-        <div className="desk-art"><img src="/art/wayfinder-atmosphere.png" alt="" /></div>
+        <div className="desk-art"><img src="/art/sres-atmosphere.png" alt="" /></div>
         <div className="desk-dossier-head"><span className="mono">Case {shortId(selected.investigation_id)}</span><Badge status={selected.status} /></div>
         <h2>{formatScenario(selected.scenario)}</h2>
         <p className="desk-dek">A working dossier that makes the current system state and the evidence behind it readable in one pass.</p>

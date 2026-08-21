@@ -3,7 +3,7 @@ import {AppShell} from "@/components/app-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: {default: "Wayfinder", template: "%s · Wayfinder"},
+  title: {default: "SREs", template: "%s · SREs"},
   description: "Evidence-first autonomous incident response",
 };
 

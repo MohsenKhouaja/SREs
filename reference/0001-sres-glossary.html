@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SREs glossary · Project reference</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+  <div class="page">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">SREs reference 0001</p>
+        <h1>Project glossary</h1>
+        <p class="dek">The words below mean exactly what they mean inside this repository. Use them consistently when reading code or answering interview questions.</p>
+      </div>
+      <div class="lesson-meta">
+        <strong>Primary source</strong>
+        <a href="../CONTEXT.md">CONTEXT.md</a><br>
+        supplemented by the state and workflow code
+      </div>
+    </header>
+
+    <main>
+      <dl class="reference-grid">
+        <div class="term"><dt>Incident</dt><dd>The observable disruption that needs investigation. In this lab, an Incident is deliberately created by one controlled Scenario.<span class="where">PRODUCT / CONTEXT</span></dd></div>
+        <div class="term"><dt>Scenario</dt><dd>One of three failure modes: <code>redis-failure</code>, <code>slow-db</code>, or <code>bad-deployment</code>. A scenario profile supplies the queries, expected signals, and proposed action.<span class="where">workflow.py · SCENARIO_PROFILES</span></dd></div>
+        <div class="term"><dt>Investigation</dt><dd>One traceable execution identified by <code>incident_id</code>. It owns agent records, approvals, status, checkpoint thread, and final report.<span class="where">models.py · IncidentState</span></dd></div>
+        <div class="term"><dt>Agent</dt><dd>A named specialist node in the workflow: Log, Metrics, Event, Correlation, or Report. Here, an agent is an application function with a narrow responsibility—not an independent chatbot.<span class="where">workflow.py · _build_graph</span></dd></div>
+        <div class="term"><dt>Finding</dt><dd>A timestamped observation with a source, human-readable message, and raw tool response. Findings are the smallest durable evidence unit shown by the UI.<span class="where">models.py · Finding</span></dd></div>
+        <div class="term"><dt>Evidence</dt><dd>The combined Log, Metrics, and Event Findings used by Correlation to rank hypotheses and propose a Root Cause and Remediation.<span class="where">workflow.py · _correlation_agent</span></dd></div>
+        <div class="term"><dt>Root Cause</dt><dd>The failure judged to best explain the Evidence. SREs has a deterministic project-specific fallback; an optional model may refine only its wording.<span class="where">workflow.py · _correlation_agent</span></dd></div>
+        <div class="term"><dt>Remediation</dt><dd>A controlled state-changing request to the bundled sample services. It can disable a failure flag or switch version <code>v2</code> back to <code>v1</code>.<span class="where">workflow.py · _execute_remediation</span></dd></div>
+        <div class="term"><dt>Approval</dt><dd>The operator's explicit approve-or-reject decision. The graph pauses before this decision and the remediation node is unreachable on rejection.<span class="where">workflow.py · _approval_node</span></dd></div>
+        <div class="term"><dt>Report</dt><dd>The final durable Investigation account: summary, Root Cause, Evidence, recommendation, affected services, and ordered timeline.<span class="where">models.py · ReportJSON</span></dd></div>
+        <div class="term"><dt>IncidentState</dt><dd>The typed working document passed between graph nodes. Each node returns only its updates; reducers append parallel list updates instead of overwriting them.<span class="where">models.py · IncidentState</span></dd></div>
+        <div class="term"><dt>Node</dt><dd>One function registered as a graph step. Edges constrain which node can run next; the graph therefore encodes the safety policy as executable control flow.<span class="where">workflow.py · _build_graph</span></dd></div>
+        <div class="term"><dt>Checkpoint</dt><dd>A saved graph execution position and state, keyed here by the Investigation ID as <code>thread_id</code>. It lets approval resume the same paused run.<span class="where">workflow.py · _config / resume</span></dd></div>
+        <div class="term"><dt>SSE stream</dt><dd>A one-way HTTP stream from backend to browser. SREs uses it for immediate activity updates while normal GET requests still retrieve durable Investigation state.<span class="where">main.py · stream</span></dd></div>
+      </dl>
+    </main>
+
+    <footer class="footer">
+      <a href="../lessons/0001-trace-an-incident.html">Return to Lesson 1</a>. Ask your teaching agent whenever a term is unclear or seems inconsistent with the code.
+    </footer>
+  </div>
+</body>
+</html>

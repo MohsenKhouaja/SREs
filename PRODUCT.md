@@ -10,7 +10,7 @@ On-call SREs and platform engineers investigating controlled production incident
 
 ## Product Purpose
 
-Wayfinder brings agent-led incident investigation, live observability evidence, human approval, and final reporting into one evidence-first workspace. It succeeds when an operator can move from signal to a defensible decision without losing the context behind it.
+SREs brings agent-led incident investigation, live observability evidence, human approval, and final reporting into one evidence-first workspace. It succeeds when an operator can move from signal to a defensible decision without losing the context behind it.
 
 ## Brand Personality
 

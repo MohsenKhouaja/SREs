@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SREs system and code map</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><div class="page">
+  <header class="masthead"><div><p class="eyebrow">SREs reference 0002</p><h1>System and code map</h1><p class="dek">Use this sheet to locate a runtime responsibility before opening code.</p></div><div class="lesson-meta"><strong>Primary sources</strong><a href="../docker-compose.yml">docker-compose.yml</a><br><a href="../backend/app/workflow.py">workflow.py</a></div></header>
+  <main>
+    <section><h2>Nine runtime services, three planes</h2><div class="topology">
+      <div class="topology-group"><strong>Control plane</strong><span>frontend :3000 — operator UI</span><span>backend :8000 — API, graph, SSE</span><span>mongodb :27017 — records + checkpoints</span></div>
+      <div class="topology-group"><strong>Observability plane</strong><span>prometheus :9090 — scrapes metrics</span><span>loki :3100 — receives/query logs</span></div>
+      <div class="topology-group"><strong>Controlled lab</strong><span>sample-api :8001 — users/products/orders</span><span>sample-payment :8002 — payments</span><span>redis :6379 — shared cache/state</span><span>postgres :5432 — sample users</span></div>
+    </div></section>
+    <section><h2>Data movement</h2><div class="table-wrap"><table class="data-table"><thead><tr><th>From</th><th>To</th><th>Purpose</th><th>Protocol</th></tr></thead><tbody>
+      <tr><td>Browser</td><td>Backend</td><td>Start, read, decide, cancel, configure</td><td>REST/JSON</td></tr>
+      <tr><td>Backend</td><td>Browser</td><td>Live agent/remediation status</td><td>SSE</td></tr>
+      <tr><td>Backend</td><td>Sample services</td><td>Enable or disable controlled failures</td><td>HTTP/JSON</td></tr>
+      <tr><td>Sample services</td><td>Loki</td><td>Push structured logs</td><td>HTTP/JSON</td></tr>
+      <tr><td>Prometheus</td><td>Sample services</td><td>Scrape metric exposition endpoints</td><td>HTTP text</td></tr>
+      <tr><td>Backend tools</td><td>Loki/Prometheus</td><td>Query Investigation Evidence</td><td>HTTP APIs</td></tr>
+      <tr><td>Backend</td><td>MongoDB</td><td>Product records and graph checkpoints</td><td>Mongo protocol</td></tr>
+    </tbody></table></div></section>
+    <section><h2>Code ownership</h2><div class="table-wrap"><table class="data-table"><thead><tr><th>Question</th><th>First file</th><th>Key symbol</th></tr></thead><tbody>
+      <tr><td>What can happen next?</td><td><a href="../backend/app/workflow.py">workflow.py</a></td><td><code>_build_graph</code></td></tr>
+      <tr><td>What data moves between nodes?</td><td><a href="../backend/app/models.py">models.py</a></td><td><code>IncidentState</code></td></tr>
+      <tr><td>How is Evidence obtained?</td><td><a href="../backend/app/tools.py">tools.py</a></td><td><code>query_loki</code>, <code>query_prometheus</code></td></tr>
+      <tr><td>What does HTTP expose?</td><td><a href="../backend/app/main.py">main.py</a></td><td><code>create_app</code></td></tr>
+      <tr><td>What is durable?</td><td><a href="../backend/app/store.py">store.py</a></td><td><code>Store</code>, <code>MongoStore</code></td></tr>
+      <tr><td>How are live events fanned out?</td><td><a href="../backend/app/events.py">events.py</a></td><td><code>EventHub</code></td></tr>
+      <tr><td>What may the LLM change?</td><td><a href="../backend/app/llm.py">llm.py</a></td><td><code>LLMClient.complete</code></td></tr>
+      <tr><td>Where do failures originate?</td><td><a href="../sample-apps/app.py">sample-apps/app.py</a></td><td><code>SimulationState</code>, <code>synthetic_traffic</code></td></tr>
+      <tr><td>How does the browser synchronize?</td><td><a href="../frontend/lib/api.ts">frontend/lib/api.ts</a></td><td>SWR hooks</td></tr>
+      <tr><td>What runs in containers?</td><td><a href="../docker-compose.yml">docker-compose.yml</a></td><td><code>services</code></td></tr>
+    </tbody></table></div></section>
+  </main>
+  <footer class="footer"><a href="../lessons/index.html">Course index</a> · Best paired with <a href="../lessons/0002-map-the-system.html">Lesson 2</a>. Ask your teaching agent about any ownership boundary you cannot locate.</footer>
+</div></body></html>
