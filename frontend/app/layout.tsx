@@ -3,8 +3,8 @@ import {AppShell} from "@/components/app-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: {default: "SREs", template: "%s · SREs"},
-  description: "Evidence-first autonomous incident response",
+  title: {default: "SREs · Evidence before action", template: "%s · SREs"},
+  description: "Evidence-first autonomous incident response with accountable human approval.",
 };
 
 export default function RootLayout({children}: Readonly<{children: React.ReactNode}>) {
