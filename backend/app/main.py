@@ -173,7 +173,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/settings")
     async def read_settings(request: Request) -> dict[str, Any]:
         settings = request.app.state.settings
-        configured_key = settings.openai_api_key if settings.llm_provider == "openai" else settings.gemini_api_key if settings.llm_provider == "gemini" else ""
+        provider_keys = {
+            "openai": settings.openai_api_key,
+            "gemini": settings.gemini_api_key,
+            "groq": settings.groq_api_key,
+        }
+        configured_key = provider_keys.get(settings.llm_provider, "")
         return {"llm_provider": settings.llm_provider, "api_key_configured": bool(configured_key), "environment": settings.environment}
 
     @app.post("/settings")
@@ -185,8 +190,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 settings.openai_api_key = body.api_key
             elif body.llm_provider == "gemini":
                 settings.gemini_api_key = body.api_key
+            elif body.llm_provider == "groq":
+                settings.groq_api_key = body.api_key
         request.app.state.workflow.llm = request.app.state.workflow.llm.__class__(settings)
-        return {"llm_provider": settings.llm_provider, "api_key_configured": bool(body.api_key), "environment": settings.environment}
+        provider_keys = {
+            "openai": settings.openai_api_key,
+            "gemini": settings.gemini_api_key,
+            "groq": settings.groq_api_key,
+        }
+        return {"llm_provider": settings.llm_provider, "api_key_configured": bool(provider_keys.get(settings.llm_provider, "")), "environment": settings.environment}
 
     @app.post("/system/recover")
     async def recover(request: Request) -> dict[str, str]:

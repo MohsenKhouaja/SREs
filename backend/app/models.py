@@ -79,5 +79,5 @@ class ApprovalDecision(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    llm_provider: Literal["deterministic", "openai", "gemini"]
+    llm_provider: Literal["deterministic", "openai", "gemini", "groq"]
     api_key: str = Field(default="", max_length=500)

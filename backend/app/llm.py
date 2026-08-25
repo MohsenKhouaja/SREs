@@ -13,9 +13,12 @@ class LLMClient:
 
     @property
     def enabled(self) -> bool:
-        return (self.settings.llm_provider == "openai" and bool(self.settings.openai_api_key)) or (
-            self.settings.llm_provider == "gemini" and bool(self.settings.gemini_api_key)
-        )
+        provider_keys = {
+            "openai": self.settings.openai_api_key,
+            "gemini": self.settings.gemini_api_key,
+            "groq": self.settings.groq_api_key,
+        }
+        return bool(provider_keys.get(self.settings.llm_provider, ""))
 
     async def complete(self, prompt: str, fallback: str) -> str:
         if not self.enabled:
@@ -31,6 +34,18 @@ class LLMClient:
                     response.raise_for_status()
                     body = response.json()
                     return body.get("output_text", fallback).strip() or fallback
+                if self.settings.llm_provider == "groq":
+                    response = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {self.settings.groq_api_key}"},
+                        json={
+                            "model": self.settings.groq_model,
+                            "messages": [{"role": "user", "content": prompt}],
+                        },
+                    )
+                    response.raise_for_status()
+                    content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                    return content.strip() or fallback
                 response = await client.post(
                     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
                     params={"key": self.settings.gemini_api_key},

@@ -36,3 +36,10 @@ async def test_runtime_settings_never_echo_secrets():
             assert "secret-value" not in response.text
             current = await client.get("/settings")
             assert current.json() == {"llm_provider": "openai", "api_key_configured": True, "environment": "test"}
+
+            groq = await client.post("/settings", json={"llm_provider": "groq", "api_key": "gsk-secret-value"})
+            assert groq.status_code == 200
+            assert "gsk-secret-value" not in groq.text
+            assert groq.json()["api_key_configured"] is True
+            current = await client.get("/settings")
+            assert current.json() == {"llm_provider": "groq", "api_key_configured": True, "environment": "test"}

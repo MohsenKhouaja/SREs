@@ -20,7 +20,7 @@ SREs turns a controlled service failure into a traceable investigation: speciali
 - **Human-in-the-loop safety** — LangGraph's `interrupt()` pauses every remediation and resumes the same investigation from its checkpoint after a decision.
 - **Durable execution** — graph checkpoints, investigations, approvals, agent state, and reports are persisted in MongoDB.
 - **Live operations UX** — FastAPI emits Server-Sent Events (SSE) to a Next.js dashboard as agent steps and state changes happen.
-- **Reproducible by default** — deterministic correlation makes the complete demo work without an LLM key; OpenAI or Gemini can optionally refine the root-cause statement.
+- **Reproducible by default** — deterministic correlation makes the complete demo work without an LLM key; OpenAI, Gemini, or Groq can optionally refine the root-cause statement.
 - **Real observability signals** — two instrumented FastAPI services continuously publish Prometheus metrics and structured Loki logs.
 
 ## Agent workflow
@@ -231,9 +231,11 @@ Edit `.env` before starting Compose.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LLM_PROVIDER` | `deterministic` | `deterministic`, `openai`, or `gemini` |
+| `LLM_PROVIDER` | `deterministic` | `deterministic`, `openai`, `gemini`, or `groq` |
 | `OPENAI_API_KEY` | empty | Enables OpenAI-assisted root-cause phrasing |
 | `GEMINI_API_KEY` | empty | Enables Gemini-assisted root-cause phrasing |
+| `GROQ_API_KEY` | empty | Enables Groq-assisted root-cause phrasing |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model used for root-cause phrasing |
 | `LANGSMITH_TRACING` | `false` | Enables LangSmith tracing when set to `true` |
 | `LANGSMITH_API_KEY` | empty | Authenticates LangSmith tracing |
 | `LANGSMITH_PROJECT` | `sres-incident-response` | LangSmith project name |
@@ -245,13 +247,20 @@ The remaining host bindings are documented in [`.env.example`](.env.example). Co
 
 ### Optional LLM providers
 
-Deterministic mode remains the source of the scenario evidence and recovery logic. When `openai` or `gemini` is configured with a key, the provider is used only to refine the concise root-cause statement; failures automatically fall back to the deterministic result.
+Deterministic mode remains the source of the scenario evidence and recovery logic. When `openai`, `gemini`, or `groq` is configured with a key, the provider is used only to refine the concise root-cause statement; failures automatically fall back to the deterministic result.
 
 For example:
 
 ```dotenv
 LLM_PROVIDER=openai
 OPENAI_API_KEY=your-key
+```
+
+To use Groq instead:
+
+```dotenv
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_your-key
 ```
 
 For observability in LangSmith:
@@ -305,7 +314,7 @@ Use `{"decision":"reject"}` to close the investigation without executing the act
 │   │   ├── main.py          # FastAPI routes, SSE, stores, and checkpointer wiring
 │   │   ├── models.py        # IncidentState and API models
 │   │   ├── store.py         # MongoDB and in-memory persistence adapters
-│   │   └── llm.py           # Deterministic/OpenAI/Gemini provider switch
+│   │   └── llm.py           # Deterministic/OpenAI/Gemini/Groq provider switch
 │   └── tests/
 ├── frontend/                # Next.js operations dashboard
 ├── sample-apps/             # Instrumented API and payment services
