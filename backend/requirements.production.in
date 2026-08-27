@@ -1,0 +1,11 @@
+fastapi>=0.116,<1
+uvicorn[standard]>=0.35,<1
+httpx>=0.28,<1
+pydantic-settings>=2.10,<3
+motor>=3.7,<4
+langchain>=1.0,<2
+langgraph>=1.0,<2
+langgraph-checkpoint-mongodb>=0.4,<1
+langchain-core>=1.0,<2
+langsmith>=0.3,<1
+prometheus-client>=0.22,<1

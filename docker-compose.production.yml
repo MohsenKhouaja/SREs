@@ -1,0 +1,303 @@
+name: sres-trysres
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-app-defaults: &app-defaults
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging: *bounded-logging
+  networks:
+    - internal
+
+services:
+  frontend:
+    <<: *app-defaults
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.production
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+        BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8000}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8000}
+    expose:
+      - "3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 256m
+    pids_limit: 128
+    networks:
+      - internal
+      - traefik
+
+  backend:
+    <<: *app-defaults
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.production
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:?GROQ_API_KEY is required}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+      GROQ_REASONING_EFFORT: ${GROQ_REASONING_EFFORT:-low}
+      MONGODB_URL: ${MONGODB_URL:?MONGODB_URL is required}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-incident_response}
+      POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
+      LOKI_URL: ${LOKI_URL:-http://loki:3100}
+      SAMPLE_API_URL: ${SAMPLE_API_URL:-http://sample-api:8001}
+      SAMPLE_PAYMENT_URL: ${SAMPLE_PAYMENT_URL:-http://sample-payment:8002}
+      SIMULATION_WARMUP_SECONDS: ${SIMULATION_WARMUP_SECONDS:-10}
+    expose:
+      - "8000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      sample-api:
+        condition: service_healthy
+      sample-payment:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 768m
+    pids_limit: 256
+
+  mongodb:
+    image: mongo:7.0.40-jammy@sha256:406a4fdca9fc763443268f000218d3849ef8996f66ed9e92ba0b501b446ab822
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?MONGO_INITDB_ROOT_USERNAME is required}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?MONGO_INITDB_ROOT_PASSWORD is required}
+      MONGO_INITDB_DATABASE: ${MONGODB_DATABASE:-incident_response}
+    expose:
+      - "27017"
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"quit(db.adminCommand('ping').ok ? 0 : 2)\""]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 30s
+    mem_limit: 512m
+    pids_limit: 256
+    logging: *bounded-logging
+    networks:
+      - internal
+
+  postgres:
+    image: postgres:16.10-alpine3.22@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-incident_db}
+    expose:
+      - "5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    mem_limit: 384m
+    pids_limit: 128
+    logging: *bounded-logging
+    networks:
+      - internal
+
+  migrate:
+    image: postgres:16.10-alpine3.22@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+    restart: "no"
+    environment:
+      POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
+    command: ["sh", "-ec", "psql \"$$POSTGRES_URL\" -v ON_ERROR_STOP=1 -f /migrations/init.sql"]
+    volumes:
+      - ./postgres/init.sql:/migrations/init.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 128m
+    pids_limit: 64
+    logging: *bounded-logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - internal
+
+  redis:
+    image: redis:7.4.11-alpine3.21@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru"]
+    expose:
+      - "6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    mem_limit: 128m
+    pids_limit: 96
+    logging: *bounded-logging
+    networks:
+      - internal
+
+  prometheus:
+    image: prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1GB
+      - --web.enable-lifecycle=false
+    expose:
+      - "9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    mem_limit: 384m
+    pids_limit: 128
+    logging: *bounded-logging
+    networks:
+      - internal
+
+  loki:
+    image: grafana/loki:3.1.1@sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/production-config.yml"]
+    expose:
+      - "3100"
+    volumes:
+      - ./loki/loki-production-config.yml:/etc/loki/production-config.yml:ro
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD", "/usr/bin/loki", "-version"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    mem_limit: 384m
+    pids_limit: 128
+    logging: *bounded-logging
+    networks:
+      - internal
+
+  sample-api:
+    <<: *app-defaults
+    build:
+      context: ./sample-apps
+      dockerfile: Dockerfile.production
+    environment:
+      SERVICE_KIND: api
+      PORT: "8001"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
+      LOKI_URL: ${LOKI_URL:-http://loki:3100}
+    expose:
+      - "8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 192m
+    pids_limit: 128
+
+  sample-payment:
+    <<: *app-defaults
+    build:
+      context: ./sample-apps
+      dockerfile: Dockerfile.production
+    environment:
+      SERVICE_KIND: payment
+      PORT: "8002"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
+      LOKI_URL: ${LOKI_URL:-http://loki:3100}
+    expose:
+      - "8002"
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 192m
+    pids_limit: 128
+
+volumes:
+  mongodb-data:
+    name: sres-trysres-mongodb-data
+  postgres-data:
+    name: sres-trysres-postgres-data
+  redis-data:
+    name: sres-trysres-redis-data
+  prometheus-data:
+    name: sres-trysres-prometheus-data
+  loki-data:
+    name: sres-trysres-loki-data
+
+networks:
+  internal:
+    name: sres-trysres-internal
+  traefik:
+    name: dokploy-network
+    external: true

@@ -179,7 +179,27 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "groq": settings.groq_api_key,
         }
         configured_key = provider_keys.get(settings.llm_provider, "")
-        return {"llm_provider": settings.llm_provider, "api_key_configured": bool(configured_key), "environment": settings.environment}
+        return {
+            "llm_provider": settings.llm_provider,
+            "api_key_configured": bool(configured_key),
+            "environment": settings.environment,
+        }
+
+    @app.get("/settings/llm")
+    async def read_llm_settings(request: Request) -> dict[str, Any]:
+        settings = request.app.state.settings
+        provider_keys = {
+            "openai": settings.openai_api_key,
+            "gemini": settings.gemini_api_key,
+            "groq": settings.groq_api_key,
+        }
+        return {
+            "llm_provider": settings.llm_provider,
+            "api_key_configured": bool(provider_keys.get(settings.llm_provider, "")),
+            "groq_model": settings.groq_model if settings.llm_provider == "groq" else None,
+            "groq_reasoning_effort": settings.groq_reasoning_effort if settings.llm_provider == "groq" else None,
+            "environment": settings.environment,
+        }
 
     @app.post("/settings")
     async def update_settings(body: SettingsUpdate, request: Request) -> dict[str, Any]:

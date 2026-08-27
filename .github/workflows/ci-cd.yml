@@ -1,0 +1,122 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [production]
+  push:
+    branches: [production]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx vitest run
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: /api
+          BACKEND_INTERNAL_URL: http://backend:8000
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install --disable-pip-version-check -r backend/requirements.txt
+      - run: pytest -q
+      - run: python -m compileall -q backend sample-apps
+      - run: python -c "from backend.app.main import app; assert app.title"
+
+  production-compose:
+    name: Production Compose
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE_PARALLEL_LIMIT: "1"
+      ENVIRONMENT: production
+      LOG_LEVEL: INFO
+      LLM_PROVIDER: groq
+      GROQ_API_KEY: ci-placeholder-not-a-credential
+      GROQ_MODEL: openai/gpt-oss-120b
+      GROQ_REASONING_EFFORT: low
+      MONGO_INITDB_ROOT_USERNAME: ci_mongo
+      MONGO_INITDB_ROOT_PASSWORD: ci_mongo_password
+      MONGODB_DATABASE: incident_response
+      MONGODB_URL: mongodb://ci_mongo:ci_mongo_password@mongodb:27017/incident_response?authSource=admin
+      POSTGRES_USER: ci_postgres
+      POSTGRES_PASSWORD: ci_postgres_password
+      POSTGRES_DB: incident_db
+      POSTGRES_URL: postgresql://ci_postgres:ci_postgres_password@postgres:5432/incident_db
+      REDIS_URL: redis://redis:6379/0
+      PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100
+      SAMPLE_API_URL: http://sample-api:8001
+      SAMPLE_PAYMENT_URL: http://sample-payment:8002
+      SIMULATION_WARMUP_SECONDS: "1"
+      NEXT_PUBLIC_API_URL: /api
+      BACKEND_INTERNAL_URL: http://backend:8000
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f docker-compose.production.yml config --quiet
+      - run: docker compose -f docker-compose.production.yml pull --ignore-buildable
+      - run: docker compose -f docker-compose.production.yml build --pull
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject committed environment files
+        shell: bash
+        run: |
+          set -euo pipefail
+          tracked_env="$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '(^|/)\.env\.example$' || true)"
+          if [[ -n "$tracked_env" ]]; then
+            echo "Committed environment files are not allowed:"
+            echo "$tracked_env"
+            exit 1
+          fi
+      - name: Reject credential patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='(gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|gsk_[A-Za-z0-9]{20,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY)'
+          if matches="$(git grep -nEI "$pattern" -- . ':(exclude)frontend/package-lock.json')"; then
+            echo "Potential credential material found:"
+            echo "$matches"
+            exit 1
+          fi
+
+  smoke:
+    name: Production Smoke
+    if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+    needs: [frontend, backend, production-compose, secret-scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/smoke-production.sh
