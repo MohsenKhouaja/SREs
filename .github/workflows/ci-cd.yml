@@ -81,7 +81,11 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker compose -f docker-compose.production.yml config --quiet
       - run: docker compose -f docker-compose.production.yml pull --ignore-buildable
-      - run: docker compose -f docker-compose.production.yml build --pull
+      - name: Build production images serially
+        run: |
+          for service in backend sample-api sample-payment frontend; do
+            docker compose -f docker-compose.production.yml build --pull "$service"
+          done
 
   secret-scan:
     name: Secret Scan
