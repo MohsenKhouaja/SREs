@@ -186,7 +186,6 @@ services:
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=7d
       - --storage.tsdb.retention.size=1GB
-      - --web.enable-lifecycle=false
     expose:
       - "9090"
     volumes:
