@@ -5,6 +5,16 @@ const backendInternalUrl = process.env.BACKEND_INTERNAL_URL || "http://localhost
 const nextConfig: NextConfig = {
   output: "standalone",
   reactStrictMode: true,
+  async redirects() {
+    return [
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "www.trysres.xyz" }],
+        destination: "https://trysres.xyz/:path*",
+        permanent: true,
+      },
+    ];
+  },
   async rewrites() {
     return [
       {
