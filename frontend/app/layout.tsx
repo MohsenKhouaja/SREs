@@ -5,6 +5,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: {default: "SREs · Evidence before action", template: "%s · SREs"},
   description: "Evidence-first incident response with accountable human approval.",
+  icons: {icon: "/brand/logo.png"},
 };
 
 export default function RootLayout({children}: Readonly<{children: React.ReactNode}>) {
