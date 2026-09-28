@@ -4,12 +4,12 @@ import {useEffect, useState} from "react";
 import {API_URL} from "./api";
 import type {StreamEvent} from "./types";
 
-export function useInvestigationStream(id?: string) {
+export function useInvestigationStream(id?: string, enabled = true) {
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || !enabled) return;
     const source = new EventSource(`${API_URL}/stream/investigation/${id}`);
     source.onopen = () => setConnected(true);
     source.onmessage = (message) => {
@@ -18,7 +18,7 @@ export function useInvestigationStream(id?: string) {
     };
     source.onerror = () => setConnected(false);
     return () => source.close();
-  }, [id]);
+  }, [id, enabled]);
 
-  return {events, connected};
+  return {events, connected: enabled && connected};
 }

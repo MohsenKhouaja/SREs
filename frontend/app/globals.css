@@ -235,7 +235,10 @@ main { width: 100%; max-width: 1480px; margin: 0 auto; padding: 34px 38px 64px; 
   .scenario-row { grid-template-columns: 42px 1fr; gap: 12px; }
   .scenario-impact, .scenario-row .button { grid-column: 2; }
   .scenario-row .button { width: fit-content; }
-  .agent-rail { grid-template-columns: repeat(5, 125px); overflow-x: auto; }
+  .agent-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-chip { border-bottom: 1px solid var(--border); }
+  .agent-chip:nth-child(2n) { border-right: 0; }
+  .agent-chip:last-child { grid-column: 1 / -1; border-bottom: 0; }
   .approval-hero { grid-template-columns: 1fr; }
   .timeline li { grid-template-columns: 1fr; gap: 3px; }
   .decision-bar { align-items: flex-start; flex-direction: column; }

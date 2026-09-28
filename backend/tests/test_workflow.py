@@ -1,4 +1,6 @@
+import asyncio
 import json
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import httpx
@@ -7,6 +9,7 @@ import pytest
 from backend.app.config import Settings
 from backend.app.events import EventHub
 from backend.app.llm import LLMUnavailable
+from backend.app.models import utc_now
 from backend.app.store import InMemoryStore
 from backend.app.workflow import InvestigationWorkflow
 
@@ -167,6 +170,105 @@ async def test_cancel_marks_investigation_terminal():
     workflow.start("cancel")
     await workflow.cancel("cancel")
     assert (await store.get_investigation("cancel"))["status"] == "cancelled"
+
+
+async def test_expired_approval_closes_with_one_real_report_without_execution():
+    workflow, store = await make_workflow()
+    workflow.lab.execute = AsyncMock()
+    approval = (await store.list_approvals("test"))[0]
+    await store.update_approval(approval["approval_id"], {"expires_at": utc_now() - timedelta(seconds=1)})
+
+    await workflow.reconcile()
+    await workflow.tasks["test"]
+    await workflow.reconcile()
+
+    document = await store.get_investigation("test")
+    assert document["status"] == "completed_with_expired_approval"
+    assert document["completed_at"]
+    assert document["report_json"]["summary"]
+    assert (await store.get_approval(approval["approval_id"]))["status"] == "expired"
+    report = next(agent for agent in await store.list_agent_states("test") if agent["agent_name"] == "report")
+    assert report["status"] == "completed"
+    calls = [call for call in workflow.llm.calls if call["agent_name"] == "report"]
+    assert len(calls) == 1
+    assert json.loads(calls[0]["user_prompt"])["approval_result"] == "expired"
+    workflow.lab.execute.assert_not_awaited()
+
+
+async def test_report_timeout_closes_running_and_waiting_agent_states():
+    workflow, store = await make_workflow()
+    await store.upsert_agent_state("test", "report", {"status": "running"})
+    await workflow._fail("test", TimeoutError())
+    document = await store.get_investigation("test")
+    assert document["status"] == "failed"
+    assert "timed out" in document["error"].lower()
+    assert all(agent["status"] not in {"waiting", "running"} for agent in await store.list_agent_states("test"))
+    assert all(approval["status"] != "pending" for approval in await store.list_approvals("test"))
+
+
+async def test_automatic_cleanup_is_not_attributed_to_agent_remediation():
+    workflow, store = await make_workflow()
+    await store.update_investigation("test", {"lab_run_id": "lab-test"})
+    workflow.lab.get_run = AsyncMock(return_value={"status": "expired", "cleanup": {"origin": "automatic_cleanup", "result": {"after": {"running": True}}}})
+    workflow.lab.execute = AsyncMock()
+    await workflow.reconcile()
+    await workflow.tasks["test"]
+    document = await store.get_investigation("test")
+    assert document["status"] == "completed_with_invalidated_approval"
+    assert document["recovery_origin"] == "automatic_cleanup"
+    assert document["report_json"]["evidence"]["lab_cleanup"]["origin"] == "automatic_cleanup"
+    workflow.lab.execute.assert_not_awaited()
+
+
+async def test_restart_reconciles_expired_checkpoint_without_duplicate_report():
+    workflow, store = await make_workflow()
+    approval = (await store.list_approvals("test"))[0]
+    await store.update_approval(approval["approval_id"], {"expires_at": utc_now() - timedelta(seconds=1)})
+    restarted = InvestigationWorkflow(store, EventHub(), workflow.settings, workflow.graph.checkpointer)
+    restarted.llm = workflow.llm
+    restarted.lab.execute = AsyncMock()
+    await restarted.reconcile(startup=True)
+    await restarted.tasks["test"]
+    await restarted.reconcile(startup=True)
+    assert (await store.get_investigation("test"))["status"] == "completed_with_expired_approval"
+    assert len([call for call in restarted.llm.calls if call["agent_name"] == "report"]) == 1
+    restarted.lab.execute.assert_not_awaited()
+
+
+async def test_reconciliation_and_rejection_race_generates_one_report():
+    workflow, store = await make_workflow()
+    approval = (await store.list_approvals("test"))[0]
+    await store.decide_approval(approval["approval_id"], "rejected")
+    await asyncio.gather(
+        workflow.resolve_approval("test", approval["approval_id"], "rejected"),
+        workflow.reconcile(), workflow.reconcile(),
+    )
+    await workflow.tasks["test"]
+    assert (await store.get_investigation("test"))["status"] == "completed_with_rejection"
+    assert len([call for call in workflow.llm.calls if call["agent_name"] == "report"]) == 1
+
+
+async def test_cancel_leaves_no_unfinished_agents_and_preserves_completed_findings():
+    workflow, store = await make_workflow()
+    await workflow.cancel("test")
+    agents = await store.list_agent_states("test")
+    assert next(agent for agent in agents if agent["agent_name"] == "log")["findings"]
+    assert next(agent for agent in agents if agent["agent_name"] == "report")["status"] == "skipped"
+    assert all(agent["status"] not in {"waiting", "running"} for agent in agents)
+
+
+async def test_report_provider_failure_is_terminal_without_a_fabricated_report():
+    workflow, store = await make_workflow()
+    workflow.llm.run = AsyncMock(side_effect=LLMUnavailable("Groq unavailable"))
+    approval = (await store.list_approvals("test"))[0]
+    await store.update_approval(approval["approval_id"], {"expires_at": utc_now() - timedelta(seconds=1)})
+    await workflow.reconcile()
+    await workflow.tasks["test"]
+    document = await store.get_investigation("test")
+    assert document["status"] == "failed"
+    assert document["report_json"] == {}
+    assert "Groq unavailable" in document["error"]
+    assert next(agent for agent in await store.list_agent_states("test") if agent["agent_name"] == "report")["status"] == "failed"
 
 
 async def test_question_rejects_invented_citations_and_persists_valid_answer():

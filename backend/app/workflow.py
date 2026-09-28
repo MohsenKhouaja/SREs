@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Literal
@@ -14,7 +15,7 @@ from langgraph.types import Command, RetryPolicy, interrupt
 
 from .config import Settings
 from .events import EventHub
-from .lab_client import LabClient
+from .lab_client import LabClient, LabControllerUnavailable
 from .llm import GroqAgentRuntime, LLMUnavailable
 from .models import (
     AgentFindingOutput,
@@ -27,7 +28,7 @@ from .models import (
     utc_iso,
     utc_now,
 )
-from .store import Store
+from .store import Store, approval_expired
 from .tools import (
     format_report,
     query_loki,
@@ -40,6 +41,7 @@ from .verification import collect_telemetry, verify_recovery
 
 
 SCENARIOS = {"redis-unavailable", "database-blocking", "release-regression"}
+logger = logging.getLogger(__name__)
 
 # This catalog describes permitted lab operations, never the diagnosis or selected action.
 LAB_ACTIONS = {
@@ -315,19 +317,103 @@ class InvestigationWorkflow:
         except Exception as exc:
             await self._fail(investigation_id, exc)
 
+    async def resolve_approval(self, investigation_id: str, approval_id: str, decision: str) -> bool:
+        approval = await self.store.get_approval(approval_id)
+        if not approval or approval["investigation_id"] != investigation_id or approval.get("evidence_version") != 3:
+            return False
+        if approval["status"] == "pending":
+            if not await self.store.decide_approval(approval_id, decision):
+                return False
+        elif approval["status"] != decision:
+            return False
+        if not await self.store.transition_investigation(
+            investigation_id, "awaiting_approval", {"status": "investigating" if decision == "approved" else "reporting", "approval_outcome": decision},
+        ):
+            return False
+        self.tasks[investigation_id] = asyncio.create_task(self._resume(investigation_id, decision))
+        return True
+
     async def resume(self, investigation_id: str, approved: bool) -> None:
+        approvals = await self.store.list_approvals(investigation_id)
+        if not approvals or not await self.resolve_approval(investigation_id, approvals[0]["approval_id"], "approved" if approved else "rejected"):
+            raise ValueError("Approval is no longer pending or executable")
+        await self.tasks[investigation_id]
+
+    async def _resume(self, investigation_id: str, decision: str) -> None:
         try:
+            snapshot = await self.graph.aget_state(self._config(investigation_id))
+            if not snapshot.values or not snapshot.next:
+                raise ValueError("The investigation checkpoint is unavailable; collect fresh evidence")
             await asyncio.wait_for(
-                self.graph.ainvoke(Command(resume=approved), config=self._config(investigation_id)), timeout=300
+                self.graph.ainvoke(Command(resume=decision), config=self._config(investigation_id)), timeout=300
             )
         except Exception as exc:
             await self._fail(investigation_id, exc)
+
+    async def reconcile(self, *, startup: bool = False) -> None:
+        for document in await self.store.list_investigations():
+            if document.get("evidence_version") != 3:
+                continue
+            investigation_id = document["incident_id"]
+            task = self.tasks.get(investigation_id)
+            active = bool(task and not task.done())
+            try:
+                lab_closed = False
+                if document.get("lab_run_id") and not document.get("lab_cleanup"):
+                    try:
+                        run = await self.lab.get_run(document["lab_run_id"])
+                    except LabControllerUnavailable:
+                        run = {}
+                    lab_closed = run.get("status") in {"cleaned", "expired", "remediated"}
+                    if lab_closed:
+                        await self.store.update_investigation(investigation_id, {"lab_cleanup": run.get("cleanup"), "recovery_origin": (run.get("cleanup") or {}).get("origin")})
+                elif document.get("lab_cleanup"):
+                    lab_closed = True
+                if active:
+                    continue
+                if startup and document["status"] in {"investigating", "reporting"}:
+                    agents = await self.store.list_agent_states(investigation_id)
+                    if any(agent.get("started_at") for agent in agents):
+                        await self._fail(investigation_id, RuntimeError("Investigation interrupted by backend restart; no operation was replayed"))
+                    continue
+                if document["status"] != "awaiting_approval":
+                    continue
+                approvals = await self.store.list_approvals(investigation_id)
+                if not approvals:
+                    await self._fail(investigation_id, ValueError("Waiting investigation has no approval record"))
+                    continue
+                approval = approvals[0]
+                if approval["status"] == "pending":
+                    decision = "expired" if approval_expired(approval) else "invalidated" if lab_closed else None
+                    if not decision:
+                        continue
+                    if not await self.store.decide_approval(approval["approval_id"], decision):
+                        continue
+                    if decision == "invalidated":
+                        await self.store.update_approval(approval["approval_id"], {"invalidation_reason": "lab_run_closed"})
+                    approval["status"] = decision
+                if approval["status"] in {"expired", "invalidated", "rejected"}:
+                    await self.resolve_approval(investigation_id, approval["approval_id"], approval["status"])
+                elif startup and approval["status"] == "approved":
+                    await self._fail(investigation_id, RuntimeError("Approved investigation interrupted before execution; collect fresh evidence"))
+            except Exception:
+                logger.exception("Investigation reconciliation failed for %s", investigation_id)
+
+    async def watch_expiry(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            try:
+                await self.reconcile()
+            except Exception:
+                logger.exception("Investigation reconciliation unavailable")
 
     async def cancel(self, investigation_id: str) -> None:
         task = self.tasks.get(investigation_id)
         if task and not task.done():
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await self.store.invalidate_pending_approvals(investigation_id, "investigation_cancelled")
+        await self._close_unfinished_agents(investigation_id, "cancelled")
         await self.store.update_investigation(investigation_id, {"status": "cancelled", "completed_at": utc_now()})
         await self.events.publish(investigation_id, {"type": "investigation", "status": "cancelled"})
 
@@ -728,19 +814,23 @@ class InvestigationWorkflow:
         """Pure interrupt gate; side effects live in the following node for resume safety."""
         token = var_child_runnable_config.set(config)
         try:
-            approved = interrupt(state["pending_approval"])
+            response = interrupt(state["pending_approval"])
         finally:
             var_child_runnable_config.reset(token)
-        decision = "approved" if approved else "rejected"
-        return {"approval_result": decision, "status": "investigating" if approved else "completed_with_rejection"}
+        decision = ("approved" if response else "rejected") if isinstance(response, bool) else response
+        if decision not in {"approved", "rejected", "expired", "invalidated"}:
+            raise ValueError("Unknown approval outcome")
+        return {"approval_result": decision, "status": "investigating" if decision == "approved" else "reporting"}
 
     async def _record_approval_decision(self, state: IncidentState) -> dict[str, Any]:
         decision = state["approval_result"]
         approved = decision == "approved"
         approval = state["pending_approval"]
         assert approval is not None
-        await self.store.update_approval(approval["approval_id"], {"status": decision, "decided_at": utc_now()})
-        await self.store.update_investigation(state["incident_id"], {"status": "investigating" if approved else "completed_with_rejection"})
+        recorded = await self.store.get_approval(approval["approval_id"])
+        if not recorded or recorded["status"] != decision:
+            raise ValueError("Approval outcome changed before resuming")
+        await self.store.update_investigation(state["incident_id"], {"status": "investigating" if approved else "reporting"})
         await self.events.publish(state["incident_id"], {"type": "approval", "approval_id": approval["approval_id"], "status": decision})
         return {}
 
@@ -756,6 +846,13 @@ class InvestigationWorkflow:
                 raise ValueError("A current, approved evidence-backed action is required")
             action_id = approval["approval_id"]
             baseline = await collect_telemetry(self.settings, state["services"])
+            recorded = await self.store.get_approval(action_id)
+            if not recorded or recorded["status"] != "approved" or approval_expired(recorded):
+                raise ValueError("The approved operation is no longer executable; collect fresh evidence")
+            if state.get("lab_run_id"):
+                run = await self.lab.get_run(state["lab_run_id"])
+                if run["status"] != "active" or approval_expired(run):
+                    raise ValueError("The lab run closed before execution; no operation was executed")
             operation = await self.lab.execute(
                 action_id,
                 state["incident_id"],
@@ -799,9 +896,16 @@ class InvestigationWorkflow:
         return {"report_json": report, "report_markdown": markdown, "status": status, "pending_approval": None}
 
     async def _rejected_report(self, state: IncidentState) -> dict[str, Any]:
+        decision = state["approval_result"]
+        recommendations = {
+            "rejected": "Remediation was rejected by the operator; no operational action was executed.",
+            "expired": "The approval window expired without an operator decision; no agent remediation was executed. Collect fresh evidence before proposing another operation.",
+            "invalidated": "The approval was invalidated because the lab run closed or the investigation stopped; no agent remediation was executed.",
+        }
+        status = {"rejected": "completed_with_rejection", "expired": "completed_with_expired_approval", "invalidated": "completed_with_invalidated_approval"}[decision]
         report, audit = await self._generate_report(
             state,
-            "Remediation was rejected by the operator; no operational action was executed.",
+            recommendations[decision],
         )
         markdown = format_report.invoke({"data": report, "format": "markdown"})["data"]["report"]
         await self._complete_agent(
@@ -809,13 +913,16 @@ class InvestigationWorkflow:
         )
         await self.store.update_investigation(
             state["incident_id"],
-            {"status": "completed_with_rejection", "completed_at": utc_now(), "report_json": report, "report_markdown": markdown},
+            {"status": status, "assessment": state.get("assessment"), "completed_at": utc_now(), "report_json": report, "report_markdown": markdown},
         )
-        await self.events.publish(state["incident_id"], {"type": "investigation", "status": "completed_with_rejection", "report": report})
-        return {"report_json": report, "report_markdown": markdown, "status": "completed_with_rejection", "pending_approval": None}
+        await self.events.publish(state["incident_id"], {"type": "investigation", "status": status, "report": report})
+        return {"report_json": report, "report_markdown": markdown, "status": status, "pending_approval": None}
 
     async def _generate_report(self, state: IncidentState, recommendation: str) -> tuple[ReportJSON, dict[str, Any]]:
         draft = self._build_report(state, recommendation)
+        document = await self.store.get_investigation(state["incident_id"])
+        if document and document.get("lab_cleanup"):
+            draft["evidence"]["lab_cleanup"] = document["lab_cleanup"]
         evidence = draft["evidence"]
         output, audit = await self._run_agent(
             state["incident_id"],
@@ -839,6 +946,7 @@ class InvestigationWorkflow:
                     ],
                     "execution": state.get("execution_result"),
                     "approval_result": state["approval_result"],
+                    "lab_cleanup": draft["evidence"].get("lab_cleanup"),
                 },
                 default=str,
                 separators=(",", ":"),
@@ -909,5 +1017,16 @@ class InvestigationWorkflow:
         }
 
     async def _fail(self, investigation_id: str, exc: Exception) -> None:
-        await self.store.update_investigation(investigation_id, {"status": "failed", "completed_at": utc_now(), "error": str(exc)})
-        await self.events.publish(investigation_id, {"type": "error", "status": "failed", "message": str(exc)})
+        message = "Investigation execution timed out; no recovery is implied" if isinstance(exc, TimeoutError) else str(exc) or type(exc).__name__
+        await self.store.invalidate_pending_approvals(investigation_id, "investigation_failed")
+        await self._close_unfinished_agents(investigation_id, "failed")
+        await self.store.update_investigation(investigation_id, {"status": "failed", "completed_at": utc_now(), "error": message})
+        await self.events.publish(investigation_id, {"type": "error", "status": "failed", "message": message})
+
+    async def _close_unfinished_agents(self, investigation_id: str, outcome: str) -> None:
+        for agent in await self.store.list_agent_states(investigation_id):
+            if agent.get("status") not in {"waiting", "running"}:
+                continue
+            status = outcome if agent["status"] == "running" else "skipped"
+            await self.store.upsert_agent_state(investigation_id, agent["agent_name"], {"status": status, "completed_at": utc_now(), "stop_reason": outcome})
+            await self.events.publish(investigation_id, {"type": "agent_status", "agent": agent["agent_name"], "status": status})

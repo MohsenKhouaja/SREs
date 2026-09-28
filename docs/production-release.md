@@ -29,3 +29,16 @@ investigation data is preserved, including explicitly labeled historical records
 After deployment, `scripts/smoke-production.sh` checks the site, backend health,
 controller and dependency readiness, Groq configuration, lab page, and www
 redirect. The smoke check does not inject faults or consume Groq tokens.
+
+## Approval Lifecycle
+
+The backend reconciles approval deadlines at startup and every five seconds.
+Expired approvals close through the LLM report path without executing the
+proposed operation. The outcome is `completed_with_expired_approval`; a closed
+lab run can instead produce `completed_with_invalidated_approval`. A reporting
+failure remains an explicit failure, never a generated fallback report.
+
+The lab controller's automatic cleanup is independent of approval expiry. Its
+audit is recorded as `automatic_cleanup`, not successful agent remediation.
+Backend restarts preserve interrupted approval checkpoints; interrupted active
+execution is marked failed rather than replaying infrastructure operations.

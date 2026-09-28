@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock
+from datetime import timedelta
 
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
@@ -7,6 +8,29 @@ from backend.app.config import Settings
 from backend.app.main import create_app
 from backend.app.models import utc_now
 from backend.app.store import InMemoryStore
+
+
+async def test_expired_decision_returns_conflict_and_closes_the_report():
+    from backend.tests.test_workflow import ModelDouble, collect_observation
+
+    store = InMemoryStore()
+    app = create_app(Settings(environment="test", use_in_memory_store=True, investigation_warmup_seconds=0), store)
+    async with LifespanManager(app):
+        workflow = app.state.workflow
+        workflow.llm = ModelDouble()
+        workflow._collect_tool = AsyncMock(side_effect=collect_observation)
+        workflow.lab.execute = AsyncMock()
+        await workflow.create("expiry-api", {"services": ["api-server"], "symptom": "Requests fail"})
+        workflow.start("expiry-api")
+        await workflow.tasks["expiry-api"]
+        approval = (await store.list_approvals("expiry-api"))[0]
+        await store.update_approval(approval["approval_id"], {"expires_at": utc_now() - timedelta(seconds=1)})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(f"/investigation/expiry-api/approval/{approval['approval_id']}", json={"decision": "approve"})
+        assert response.status_code == 409
+        await workflow.tasks["expiry-api"]
+        assert (await store.get_investigation("expiry-api"))["status"] == "completed_with_expired_approval"
+        workflow.lab.execute.assert_not_awaited()
 
 
 async def test_api_create_list_detail_cancel_and_errors(monkeypatch):
