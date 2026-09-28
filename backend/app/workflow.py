@@ -193,6 +193,16 @@ class InvestigationWorkflow:
         self.store = store
         self.events = events
         self.settings = settings
+        self.lab_actions = {
+            **LAB_ACTIONS,
+            "terminate_blocking_session": {
+                **LAB_ACTIONS["terminate_blocking_session"],
+                "required_identity": [
+                    f"resource_id=postgres:{settings.sample_database_name}",
+                    f"database={settings.sample_database_name}", "pid", "backend_start",
+                ],
+            },
+        }
         self.llm = GroqAgentRuntime(settings)
         self.llm_semaphore = asyncio.Semaphore(1)
         self.lab = LabClient(settings)
@@ -603,7 +613,7 @@ class InvestigationWorkflow:
             ),
             user_prompt=json.dumps(
                 {
-                    "available_lab_actions": LAB_ACTIONS,
+                    "available_lab_actions": self.lab_actions,
                     "valid_finding_ids": sorted(valid_finding_ids),
                     "valid_observation_ids": sorted(valid_observation_ids),
                     "evidence": evidence,
@@ -690,8 +700,7 @@ class InvestigationWorkflow:
         if any(value is None or str(value) not in serialized for value in required):
             raise ValueError("Proposed action identities are not supported by its cited infrastructure observations")
 
-    @staticmethod
-    def _validate_action(action: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
+    def _validate_action(self, action: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
         serialized = json.dumps(evidence, default=str)
         resource_id = action["resource_id"]
         if resource_id not in serialized:
@@ -703,7 +712,7 @@ class InvestigationWorkflow:
             return {"resource_id": resource_id, "expected_container_id": container_id}
         if action["action_type"] == "terminate_blocking_session":
             database, pid, backend_start = action.get("database"), action.get("pid"), action.get("backend_start")
-            if database != "incident_db" or pid is None or str(pid) not in serialized or not backend_start or backend_start not in serialized:
+            if database != self.settings.sample_database_name or resource_id != f"postgres:{database}" or pid is None or str(pid) not in serialized or not backend_start or backend_start not in serialized:
                 raise ValueError("Terminating a session requires its observed database, PID, and backend start time")
             return {"resource_id": resource_id, "database": database, "pid": pid, "backend_start": backend_start}
         expected_container_id = action.get("expected_container_id")

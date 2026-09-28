@@ -11,6 +11,19 @@ from backend.app.store import InMemoryStore
 from backend.app.workflow import InvestigationWorkflow
 
 
+def test_database_action_uses_configured_production_database():
+    workflow = InvestigationWorkflow(InMemoryStore(), EventHub(), Settings(sample_database_name="sres_production"))
+    action = {
+        "action_type": "terminate_blocking_session", "resource_id": "postgres:sres_production",
+        "database": "sres_production", "pid": 42, "backend_start": "2026-09-28T00:00:00Z",
+    }
+    assert workflow._validate_action(action, {"observed": action})["database"] == "sres_production"
+    assert "database=sres_production" in workflow.lab_actions["terminate_blocking_session"]["required_identity"]
+    unrelated = {**action, "database": "incident_db", "resource_id": "postgres:incident_db"}
+    with pytest.raises(ValueError, match="observed database"):
+        workflow._validate_action(unrelated, {"observed": unrelated})
+
+
 class ModelDouble:
     """Test-only model responses; no runtime code imports these fixtures."""
     enabled = True

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     sample_api_v1_image: str = "sres-sample-api:v1"
     sample_api_v2_image: str = "sres-sample-api:v2"
     postgres_url: str = "postgresql://lab_controller:lab_controller@127.0.0.1:5432/incident_db"
+    postgres_database: str = "incident_db"
     sample_api_redis_url: str = "redis://redis:6379"
     sample_api_postgres_url: str = "postgresql://app_user:app_user@postgres:5432/incident_db"
     sample_api_loki_url: str = "http://loki:3100"
