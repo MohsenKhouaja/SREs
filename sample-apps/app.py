@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import random
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -14,8 +14,10 @@ import asyncpg
 import httpx
 import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+from release_behavior import product_payload
 
 
 SERVICE_KIND = os.getenv("SERVICE_KIND", "api")
@@ -35,26 +37,9 @@ PAYMENTS_PROCESSED = Counter("payments_processed_total", "Processed payments", [
 PAYMENTS_FAILED = Counter("payments_failed_total", "Failed payments", ["service"], registry=registry)
 
 
-class Toggle(BaseModel):
-    enabled: bool
-
-
-class Deployment(BaseModel):
-    version: str
-
-
 class Payment(BaseModel):
     amount: float
     currency: str = "USD"
-
-
-class SimulationState:
-    redis_failure = False
-    slow_db = False
-    version = "v1"
-
-
-state = SimulationState()
 
 
 async def ship_log(level: str, message: str, **fields: Any) -> None:
@@ -76,45 +61,34 @@ async def ship_log(level: str, message: str, **fields: Any) -> None:
     }
     try:
         async with httpx.AsyncClient(timeout=2) as client:
-            await client.post(f"{LOKI_URL}/loki/api/v1/push", json=body)
-    except httpx.HTTPError:
-        pass
+            response = await client.post(f"{LOKI_URL}/loki/api/v1/push", json=body)
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        logging.getLogger(__name__).warning("Log delivery failed: %s", exc)
 
 
-async def synthetic_traffic() -> None:
-    while True:
-        try:
-            if state.redis_failure:
-                REDIS_ACTIVE.labels(SERVICE_NAME).set(0)
-                REDIS_CONNECTIONS.labels(SERVICE_NAME, "error").inc()
-                HTTP_REQUESTS.labels(SERVICE_NAME, "synthetic", "GET", "500").inc(8)
-                await ship_log("ERROR", "Redis connection timeout; connection pool unavailable", status=500, duration_ms=900)
-            elif state.slow_db and SERVICE_KIND == "api":
-                POSTGRES_QUERIES.labels(SERVICE_NAME, "slow").inc()
-                POSTGRES_DURATION.labels(SERVICE_NAME).observe(8)
-                HTTP_DURATION.labels(SERVICE_NAME, "/api/users").observe(8)
-                await ship_log("DEBUG", "SELECT * FROM users took 8000ms", query="SELECT * FROM users", duration_ms=8000)
-            elif state.version == "v2":
-                HTTP_REQUESTS.labels(SERVICE_NAME, "synthetic", "GET", "500").inc(8)
-                await ship_log("ERROR", "Internal server error introduced by deployment v2", version="v2", status=500)
-            else:
-                REDIS_ACTIVE.labels(SERVICE_NAME).set(1)
-                HTTP_REQUESTS.labels(SERVICE_NAME, "synthetic", "GET", "200").inc(5)
-                HTTP_DURATION.labels(SERVICE_NAME, "synthetic").observe(random.uniform(0.02, 0.1))
-                await ship_log("INFO", "Synthetic request completed", status=200, duration_ms=random.randint(20, 100), version="v1")
-        except Exception:
-            pass
-        await asyncio.sleep(2)
+async def lab_traffic() -> None:
+    """Generate real HTTP requests; only request handlers record measured telemetry."""
+    port = os.getenv("PORT", "8001" if SERVICE_KIND == "api" else "8002")
+    async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=15, headers={"X-Traffic-Source": "lab-workload"}) as client:
+        while True:
+            calls = [client.get("/api/users"), client.get("/api/products")] if SERVICE_KIND == "api" else [client.post("/api/payments", json={"amount": 1, "currency": "USD"})]
+            results = await asyncio.gather(*calls, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logging.getLogger(__name__).warning("Lab request failed: %s", result)
+            await asyncio.sleep(2)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.redis = redis.from_url(REDIS_URL, decode_responses=True)
+    app.state.redis = redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
     try:
         app.state.postgres = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).error("PostgreSQL connection failed: %s", exc)
         app.state.postgres = None
-    task = asyncio.create_task(synthetic_traffic())
+    task = asyncio.create_task(lab_traffic())
     yield
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
@@ -128,24 +102,46 @@ app = FastAPI(title=f"SREs sample {SERVICE_NAME}", lifespan=lifespan)
 
 @app.middleware("http")
 async def observe_requests(request: Request, call_next):
-    if request.url.path in {"/metrics", "/health"}:
+    if request.url.path in {"/metrics", "/health", "/live"}:
         return await call_next(request)
     started = time.monotonic()
-    if state.version == "v2" and request.url.path.startswith("/api/") and "/simulate/" not in request.url.path:
-        response = Response(content='{"detail":"Internal server error"}', status_code=500, media_type="application/json")
-    else:
+    try:
         response = await call_next(request)
+    except Exception as exc:
+        await ship_log("ERROR", f"Request failed: {type(exc).__name__}: {exc}", path=request.url.path)
+        response = JSONResponse({"detail": "Dependency request failed"}, status_code=503)
     duration = time.monotonic() - started
     HTTP_REQUESTS.labels(SERVICE_NAME, request.url.path, request.method, str(response.status_code)).inc()
     HTTP_DURATION.labels(SERVICE_NAME, request.url.path).observe(duration)
     level = "ERROR" if response.status_code >= 500 else "INFO"
-    await ship_log(level, f"{request.method} {request.url.path} {response.status_code} {duration * 1000:.0f}ms", method=request.method, path=request.url.path, status=response.status_code, duration_ms=round(duration * 1000, 2), version=state.version)
+    await ship_log(level, f"{request.method} {request.url.path} {response.status_code} {duration * 1000:.0f}ms", method=request.method, path=request.url.path, status=response.status_code, duration_ms=round(duration * 1000, 2), traffic_source=request.headers.get("X-Traffic-Source", "external"))
     return response
 
 
+@app.get("/live")
+async def live() -> dict[str, str]:
+    return {"status": "alive"}
+
+
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "healthy", "service": SERVICE_NAME, "version": state.version}
+async def health(request: Request) -> JSONResponse:
+    dependencies = {}
+    try:
+        await request.app.state.redis.ping()
+        dependencies["redis"] = "healthy"
+    except Exception:
+        dependencies["redis"] = "unreachable"
+    if SERVICE_KIND == "api":
+        try:
+            if not request.app.state.postgres:
+                raise RuntimeError("PostgreSQL pool unavailable")
+            async with request.app.state.postgres.acquire(timeout=2) as connection:
+                await connection.fetchval("SELECT 1", timeout=2)
+            dependencies["postgres"] = "healthy"
+        except Exception:
+            dependencies["postgres"] = "unreachable"
+    healthy = all(value == "healthy" for value in dependencies.values())
+    return JSONResponse({"status": "healthy" if healthy else "degraded", "service": SERVICE_NAME, "dependencies": dependencies}, status_code=200 if healthy else 503)
 
 
 @app.get("/metrics")
@@ -157,16 +153,17 @@ async def metrics() -> Response:
 async def users(request: Request) -> dict[str, Any]:
     if SERVICE_KIND != "api":
         raise HTTPException(status_code=404, detail="Not available on payment service")
-    delay = 8 if state.slow_db else 0
     started = time.monotonic()
-    if delay:
-        await asyncio.sleep(delay)
-    if request.app.state.postgres:
-        async with request.app.state.postgres.acquire() as connection:
-            rows = await connection.fetch("SELECT id, name, email FROM users ORDER BY id LIMIT 20")
+    if not request.app.state.postgres:
+        POSTGRES_QUERIES.labels(SERVICE_NAME, "error").inc()
+        raise HTTPException(status_code=503, detail="PostgreSQL unavailable")
+    try:
+        async with request.app.state.postgres.acquire(timeout=2) as connection:
+            rows = await connection.fetch("SELECT id, name, email FROM users ORDER BY id LIMIT 20", timeout=6)
             result = [dict(row) for row in rows]
-    else:
-        result = [{"id": 1, "name": "Ada", "email": "ada@example.test"}]
+    except Exception:
+        POSTGRES_QUERIES.labels(SERVICE_NAME, "error").inc()
+        raise
     duration = time.monotonic() - started
     POSTGRES_QUERIES.labels(SERVICE_NAME, "success").inc()
     POSTGRES_DURATION.labels(SERVICE_NAME).observe(duration)
@@ -178,22 +175,21 @@ async def users(request: Request) -> dict[str, Any]:
 async def products(request: Request) -> dict[str, Any]:
     if SERVICE_KIND != "api":
         raise HTTPException(status_code=404, detail="Not available on payment service")
-    if state.redis_failure:
-        REDIS_ACTIVE.labels(SERVICE_NAME).set(0)
+    try:
+        result = await product_payload(request.app.state.redis)
+        REDIS_CONNECTIONS.labels(SERVICE_NAME, "success").inc()
+        REDIS_ACTIVE.labels(SERVICE_NAME).set(1)
+    except Exception:
         REDIS_CONNECTIONS.labels(SERVICE_NAME, "error").inc()
-        raise HTTPException(status_code=503, detail="Redis connection refused")
-    REDIS_CONNECTIONS.labels(SERVICE_NAME, "success").inc()
-    REDIS_ACTIVE.labels(SERVICE_NAME).set(1)
-    await request.app.state.redis.set("products:last-read", str(time.time()), ex=60)
-    return {"products": [{"id": 1, "name": "Telemetry adapter"}]}
+        REDIS_ACTIVE.labels(SERVICE_NAME).set(0)
+        raise
+    return result
 
 
 @app.post("/api/orders")
 async def orders(request: Request) -> dict[str, str]:
     if SERVICE_KIND != "api":
         raise HTTPException(status_code=404, detail="Not available on payment service")
-    if state.redis_failure:
-        raise HTTPException(status_code=503, detail="Redis connection refused")
     order_id = uuid.uuid4().hex[:12]
     await request.app.state.redis.set(f"order:{order_id}", "created", ex=300)
     return {"order_id": order_id, "status": "created"}
@@ -203,8 +199,11 @@ async def orders(request: Request) -> dict[str, str]:
 async def slow_query(request: Request) -> dict[str, float]:
     if SERVICE_KIND != "api":
         raise HTTPException(status_code=404, detail="Not available on payment service")
+    if not request.app.state.postgres:
+        raise HTTPException(status_code=503, detail="PostgreSQL unavailable")
     started = time.monotonic()
-    await asyncio.sleep(8 if state.slow_db else 0.05)
+    async with request.app.state.postgres.acquire() as connection:
+        await connection.fetch("SELECT id FROM users ORDER BY id LIMIT 1", timeout=6)
     duration = time.monotonic() - started
     POSTGRES_DURATION.labels(SERVICE_NAME).observe(duration)
     return {"duration_seconds": duration}
@@ -214,11 +213,14 @@ async def slow_query(request: Request) -> dict[str, float]:
 async def create_payment(request: Request, payment: Payment) -> dict[str, Any]:
     if SERVICE_KIND != "payment":
         raise HTTPException(status_code=404, detail="Not available on API service")
-    if state.redis_failure:
-        PAYMENTS_FAILED.labels(SERVICE_NAME).inc()
-        raise HTTPException(status_code=503, detail="Redis connection refused")
     payment_id = uuid.uuid4().hex[:12]
-    await request.app.state.redis.set(f"payment:{payment_id}", "processed", ex=300)
+    try:
+        await request.app.state.redis.set(f"payment:{payment_id}", "processed", ex=300)
+        REDIS_CONNECTIONS.labels(SERVICE_NAME, "success").inc()
+    except Exception:
+        REDIS_CONNECTIONS.labels(SERVICE_NAME, "error").inc()
+        PAYMENTS_FAILED.labels(SERVICE_NAME).inc()
+        raise
     PAYMENTS_PROCESSED.labels(SERVICE_NAME).inc()
     return {"payment_id": payment_id, "status": "processed", **payment.model_dump()}
 
@@ -229,28 +231,3 @@ async def get_payment(request: Request, payment_id: str) -> dict[str, str]:
         raise HTTPException(status_code=404, detail="Not available on API service")
     status = await request.app.state.redis.get(f"payment:{payment_id}")
     return {"payment_id": payment_id, "status": status or "unknown"}
-
-
-@app.post("/api/simulate/redis-failure")
-async def simulate_redis(body: Toggle) -> dict[str, Any]:
-    state.redis_failure = body.enabled
-    await ship_log("WARNING" if body.enabled else "INFO", f"Redis failure simulation {'enabled' if body.enabled else 'disabled'}")
-    return {"scenario": "redis-failure", "enabled": state.redis_failure}
-
-
-@app.post("/api/simulate/slow-db")
-async def simulate_slow_db(body: Toggle) -> dict[str, Any]:
-    if SERVICE_KIND != "api":
-        raise HTTPException(status_code=404, detail="Not available on payment service")
-    state.slow_db = body.enabled
-    await ship_log("WARNING" if body.enabled else "INFO", f"Slow database simulation {'enabled' if body.enabled else 'disabled'}")
-    return {"scenario": "slow-db", "enabled": state.slow_db}
-
-
-@app.post("/api/simulate/bad-deployment")
-async def simulate_deployment(body: Deployment) -> dict[str, str]:
-    if body.version not in {"v1", "v2"}:
-        raise HTTPException(status_code=400, detail="version must be v1 or v2")
-    state.version = body.version
-    await ship_log("WARNING" if body.version == "v2" else "INFO", f"Deployment switched to {body.version}", version=body.version)
-    return {"scenario": "bad-deployment", "version": state.version}

@@ -54,10 +54,10 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:?GROQ_API_KEY is required}
       GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
-      GROQ_REASONING_EFFORT: ${GROQ_REASONING_EFFORT:-low}
+      GROQ_MAX_TOKENS: ${GROQ_MAX_TOKENS:-1024}
+      GROQ_SERVICE_TIER: ${GROQ_SERVICE_TIER:-on_demand}
       MONGODB_URL: ${MONGODB_URL:?MONGODB_URL is required}
       MONGODB_DATABASE: ${MONGODB_DATABASE:-incident_response}
       POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
@@ -66,7 +66,10 @@ services:
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
       SAMPLE_API_URL: ${SAMPLE_API_URL:-http://sample-api:8001}
       SAMPLE_PAYMENT_URL: ${SAMPLE_PAYMENT_URL:-http://sample-payment:8002}
-      SIMULATION_WARMUP_SECONDS: ${SIMULATION_WARMUP_SECONDS:-10}
+      INVESTIGATION_WARMUP_SECONDS: ${INVESTIGATION_WARMUP_SECONDS:-10}
+      LAB_CONTROLLER_URL: http://lab-controller:8010
+      LAB_MONITOR_TOKEN: ${LAB_MONITOR_TOKEN:?LAB_MONITOR_TOKEN is required}
+      LAB_OPERATOR_TOKEN: ${LAB_OPERATOR_TOKEN:?LAB_OPERATOR_TOKEN is required}
     expose:
       - "8000"
     depends_on:
@@ -81,6 +84,8 @@ services:
       sample-api:
         condition: service_healthy
       sample-payment:
+        condition: service_healthy
+      lab-controller:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -142,9 +147,10 @@ services:
     restart: "no"
     environment:
       POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
-    command: ["sh", "-ec", "psql \"$$POSTGRES_URL\" -v ON_ERROR_STOP=1 -f /migrations/init.sql"]
+    command: ["sh", "-ec", "psql \"$$POSTGRES_URL\" -v ON_ERROR_STOP=1 -f /migrations/init.sql -f /migrations/bootstrap.sql"]
     volumes:
       - ./postgres/init.sql:/migrations/init.sql:ro
+      - ./postgres/bootstrap.sql:/migrations/bootstrap.sql:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -226,14 +232,17 @@ services:
 
   sample-api:
     <<: *app-defaults
+    image: sres-trysres-sample-api:v1
     build:
       context: ./sample-apps
       dockerfile: Dockerfile.production
+      args:
+        RELEASE: v1
     environment:
       SERVICE_KIND: api
       PORT: "8001"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
+      POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/incident_db
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
     expose:
       - "8001"
@@ -262,7 +271,7 @@ services:
       SERVICE_KIND: payment
       PORT: "8002"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      POSTGRES_URL: ${POSTGRES_URL:?POSTGRES_URL is required}
+      POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/incident_db
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
     expose:
       - "8002"
@@ -280,6 +289,50 @@ services:
       retries: 5
       start_period: 20s
     mem_limit: 192m
+    pids_limit: 128
+
+  sample-api-v2:
+    <<: *app-defaults
+    image: sres-trysres-sample-api:v2
+    build:
+      context: ./sample-apps
+      dockerfile: Dockerfile.production
+      args:
+        RELEASE: v2
+    restart: "no"
+    command: ["python", "-c", "pass"]
+
+  lab-controller:
+    <<: *app-defaults
+    build: ./lab-controller
+    environment:
+      MONGODB_URL: ${MONGODB_URL:?MONGODB_URL is required}
+      MONGODB_DATABASE: sres_lab_control
+      MONITOR_TOKEN: ${LAB_MONITOR_TOKEN:?LAB_MONITOR_TOKEN is required}
+      OPERATOR_TOKEN: ${LAB_OPERATOR_TOKEN:?LAB_OPERATOR_TOKEN is required}
+      COMPOSE_PROJECT: sres-trysres
+      SAMPLE_API_NETWORK: sres-trysres-internal
+      SAMPLE_API_V1_IMAGE: sres-trysres-sample-api:v1
+      SAMPLE_API_V2_IMAGE: sres-trysres-sample-api:v2
+      SAMPLE_API_PUBLISH_PORT: "false"
+      POSTGRES_URL: postgresql://lab_controller:lab_controller@postgres:5432/incident_db
+      SAMPLE_API_POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/incident_db
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      sample-api-v2:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8010/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 256m
     pids_limit: 128
 
 volumes:

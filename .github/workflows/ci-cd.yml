@@ -45,7 +45,7 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: backend/requirements.txt
-      - run: python -m pip install --disable-pip-version-check -r backend/requirements.txt
+      - run: python -m pip install --disable-pip-version-check -r backend/requirements.txt -r lab-controller/requirements.txt
       - run: pytest -q
       - run: python -m compileall -q backend sample-apps
       - run: python -c "from backend.app.main import app; assert app.title"
@@ -74,7 +74,9 @@ jobs:
       LOKI_URL: http://loki:3100
       SAMPLE_API_URL: http://sample-api:8001
       SAMPLE_PAYMENT_URL: http://sample-payment:8002
-      SIMULATION_WARMUP_SECONDS: "1"
+      INVESTIGATION_WARMUP_SECONDS: "1"
+      LAB_MONITOR_TOKEN: ci-monitor-placeholder
+      LAB_OPERATOR_TOKEN: ci-operator-placeholder
       NEXT_PUBLIC_API_URL: /api
       BACKEND_INTERNAL_URL: http://backend:8000
     steps:
@@ -83,7 +85,7 @@ jobs:
       - run: docker compose -f docker-compose.production.yml pull --ignore-buildable
       - name: Build production images serially
         run: |
-          for service in backend sample-api sample-payment frontend; do
+          for service in backend lab-controller sample-api sample-api-v2 sample-payment frontend; do
             docker compose -f docker-compose.production.yml build --pull "$service"
           done
 

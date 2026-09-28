@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import uuid
-from datetime import timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Any, Literal
 
-import httpx
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.checkpoint.memory import InMemorySaver
@@ -16,53 +14,178 @@ from langgraph.types import Command, RetryPolicy, interrupt
 
 from .config import Settings
 from .events import EventHub
-from .llm import LLMClient
-from .models import Finding, IncidentState, ReportJSON, utc_iso, utc_now
+from .lab_client import LabClient
+from .llm import GroqAgentRuntime, LLMUnavailable
+from .models import (
+    AgentFindingOutput,
+    CorrelationOutput,
+    Finding,
+    IncidentState,
+    QuestionOutput,
+    ReportJSON,
+    ReportOutput,
+    utc_iso,
+    utc_now,
+)
 from .store import Store
-from .tools import build_timeline, format_report, generate_root_cause, query_loki, query_prometheus, rank_hypotheses
+from .tools import (
+    format_report,
+    query_loki,
+    query_prometheus,
+    inspect_database_blocking,
+    inspect_release_history,
+    inspect_runtime_resource,
+)
+from .verification import collect_telemetry, verify_recovery
 
 
-SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
-    "redis-failure": {
-        "log_query": '{service=~"api-server|payment-service"} |~ "Redis|redis|connection"',
-        "metric_query": 'sum(rate(http_requests_total{status="500"}[1m]))',
-        "log_message": "Redis connection timeouts appear across both dependent services.",
-        "metric_message": "HTTP 500 rate increased while successful Redis connections dropped.",
-        "event_message": "Redis failure preceded dependent API and payment errors.",
-        "root_cause": "Redis unavailability exhausted connection attempts and caused dependent requests to fail.",
-        "summary": "The incident was caused by Redis becoming unavailable to the API and payment services.",
-        "affected": ["api-server", "payment-service", "redis"],
-        "action_type": "restart_service",
-        "target": "redis",
-        "recommendation": "Restore Redis availability, then verify dependent request success and connection metrics.",
+SCENARIOS = {"redis-unavailable", "database-blocking", "release-regression"}
+
+# This catalog describes permitted lab operations, never the diagnosis or selected action.
+LAB_ACTIONS = {
+    "start_service": {
+        "description": "Start the observed stopped Redis service.",
+        "required_identity": ["resource_id=redis", "expected_container_id"],
     },
-    "slow-db": {
-        "log_query": '{service="api-server"} |~ "SELECT|8000ms|slow"',
-        "metric_query": "histogram_quantile(0.95, sum(rate(postgres_query_duration_seconds_bucket[1m])) by (le))",
-        "log_message": "API logs show user queries taking approximately 8 seconds.",
-        "metric_message": "PostgreSQL query and HTTP request p95 latency spiked together.",
-        "event_message": "The database latency increase preceded slow API responses.",
-        "root_cause": "Database query latency saturated the API request path.",
-        "summary": "A simulated slow PostgreSQL query raised API latency to approximately eight seconds.",
-        "affected": ["api-server", "postgres"],
-        "action_type": "disable_failure_mode",
-        "target": "api-server:slow-db",
-        "recommendation": "Disable the slow-query mode and verify database and request p95 latency return to baseline.",
+    "terminate_blocking_session": {
+        "description": "Terminate the observed PostgreSQL session currently holding the application-blocking lock.",
+        "required_identity": ["resource_id=postgres:incident_db", "database=incident_db", "pid", "backend_start"],
     },
-    "bad-deployment": {
-        "log_query": '{service=~"api-server|payment-service"} |~ "v2|Internal server error|deployment"',
-        "metric_query": 'sum(rate(http_requests_total{status="500"}[1m])) / sum(rate(http_requests_total[1m]))',
-        "log_message": "Version v2 emits internal server errors on normal request paths.",
-        "metric_message": "The HTTP 500 ratio increased sharply after v2 became active.",
-        "event_message": "The v2 deployment immediately preceded the error-rate increase.",
-        "root_cause": "The v2 deployment introduced a high rate of HTTP 500 responses.",
-        "summary": "A deliberately broken v2 deployment caused widespread HTTP 500 responses.",
-        "affected": ["api-server", "payment-service"],
-        "action_type": "rollback_deployment",
-        "target": "sample-services:v2-to-v1",
-        "recommendation": "Roll both sample services back to v1 and verify the HTTP 500 ratio returns to baseline.",
+    "rollback_release": {
+        "description": "Replace the current sample API image with the prepared v1 image from the newest release transition whose destination container matches the current observation.",
+        "required_identity": ["resource_id=sample-api", "expected_container_id", "expected_current_image_id", "previous_image_id"],
     },
 }
+
+
+def _compact_findings(findings: list[Finding]) -> list[dict[str, Any]]:
+    """Keep downstream LLM context grounded without replaying raw tool payloads."""
+    compacted = []
+    for finding in findings:
+        item = {key: finding.get(key) for key in ("finding_id", "timestamp", "source", "message")}
+        infrastructure = [
+            _compact_infrastructure_observation(observation)
+            for observation in finding.get("raw_data", {}).get("observations", [])
+            if observation.get("name")
+            in {"inspect_runtime_resource", "inspect_database_blocking", "inspect_release_history"}
+        ]
+        if infrastructure:
+            item["infrastructure_observations"] = infrastructure
+        compacted.append(item)
+    return compacted
+
+
+def _pick(value: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: value[key] for key in keys if key in value}
+
+
+def _container_identity(value: dict[str, Any]) -> dict[str, Any]:
+    return _pick(
+        value,
+        (
+            "observation_id",
+            "resource_id",
+            "container_id",
+            "state",
+            "running",
+            "health",
+            "image_id",
+            "image_tags",
+            "started_at",
+            "observed_at",
+        ),
+    )
+
+
+def _compact_infrastructure_observation(observation: dict[str, Any]) -> dict[str, Any]:
+    result = observation.get("result", {})
+    data = result.get("data", {})
+    name = observation.get("name")
+    compact_data: Any = data
+    if name == "inspect_runtime_resource" and isinstance(data, dict):
+        compact_data = _container_identity(data)
+    elif name == "inspect_database_blocking" and isinstance(data, dict):
+        compact_data = {
+            "observations": [
+                _pick(
+                    row,
+                    (
+                        "observation_id",
+                        "resource_id",
+                        "database",
+                        "pid",
+                        "backend_start",
+                        "application_name",
+                        "blocked_pid",
+                        "blocked_application",
+                        "wait_event_type",
+                        "wait_event",
+                        "blocker_query",
+                        "blocked_query",
+                        "observed_at",
+                    ),
+                )
+                for row in data.get("observations", [])
+            ]
+        }
+    elif name == "inspect_release_history" and isinstance(data, dict):
+        compact_data = {
+            "current": _container_identity(data.get("current", {})),
+            "history": [
+                {
+                    **_pick(entry, ("run_id", "action_id", "observed_at")),
+                    "from": _container_identity(entry.get("from", {})),
+                    "to": _container_identity(entry.get("to", {})),
+                }
+                for entry in data.get("history", [])[:3]
+            ],
+        }
+    return {
+        "name": name,
+        "arguments": observation.get("arguments", {}),
+        "status": observation.get("status"),
+        "result": {
+            "status": result.get("status"),
+            "data": compact_data,
+            "metadata": _pick(result.get("metadata", {}), ("observation_id", "observed_at", "source", "error")),
+        },
+    }
+
+
+def _observation_ids(value: Any) -> set[str]:
+    """Collect immutable observation references from nested tool results."""
+    if isinstance(value, dict):
+        identifiers = {value["observation_id"]} if isinstance(value.get("observation_id"), str) else set()
+        for nested in value.values():
+            identifiers.update(_observation_ids(nested))
+        return identifiers
+    if isinstance(value, list):
+        identifiers: set[str] = set()
+        for nested in value:
+            identifiers.update(_observation_ids(nested))
+        return identifiers
+    return set()
+
+
+def _index_observation_ids(value: Any, index: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Map each observation ID to the evidence object that identity represents."""
+    indexed = index if index is not None else {}
+    if isinstance(value, dict):
+        identifier = value.get("observation_id")
+        if isinstance(identifier, str):
+            indexed.setdefault(identifier, value)
+        result = value.get("result")
+        if isinstance(result, dict):
+            metadata = result.get("metadata", {})
+            metadata_id = metadata.get("observation_id") if isinstance(metadata, dict) else None
+            if isinstance(metadata_id, str):
+                indexed[metadata_id] = result.get("data", {})
+        for nested in value.values():
+            _index_observation_ids(nested, indexed)
+    elif isinstance(value, list):
+        for nested in value:
+            _index_observation_ids(nested, indexed)
+    return indexed
 
 
 class InvestigationWorkflow:
@@ -70,7 +193,9 @@ class InvestigationWorkflow:
         self.store = store
         self.events = events
         self.settings = settings
-        self.llm = LLMClient(settings)
+        self.llm = GroqAgentRuntime(settings)
+        self.llm_semaphore = asyncio.Semaphore(1)
+        self.lab = LabClient(settings)
         self.tasks: dict[str, asyncio.Task[Any]] = {}
         self.graph = self._build_graph(checkpointer or InMemorySaver())
 
@@ -90,7 +215,7 @@ class InvestigationWorkflow:
         builder.add_edge(START, "metrics")
         builder.add_edge(START, "event")
         builder.add_edge(["log", "metrics", "event"], "correlation")
-        builder.add_edge("correlation", "approval")
+        builder.add_conditional_edges("correlation", lambda state: "approval" if state.get("pending_approval") else "report")
         builder.add_edge("approval", "record_decision")
         builder.add_conditional_edges("record_decision", self._route_approval, {"approved": "execute", "rejected": "rejected"})
         builder.add_edge("execute", "report")
@@ -98,37 +223,61 @@ class InvestigationWorkflow:
         builder.add_edge("rejected", END)
         return builder.compile(checkpointer=checkpointer)
 
-    async def create(self, investigation_id: str, scenario: str) -> None:
+    async def create(self, investigation_id: str, context: dict[str, Any], lab_run_id: str | None = None) -> None:
         now = utc_now()
+        time_to = context.get("time_to") or now
+        time_from = context.get("time_from") or (time_to - timedelta(minutes=5))
         await self.store.create_investigation(
             {
                 "incident_id": investigation_id,
-                "scenario": scenario,
+                "scenario": context.get("scenario", "manual"),
+                "services": context["services"],
+                "symptom": context["symptom"],
+                "observation_start": time_from,
+                "observation_end": time_to,
+                "lab_run_id": lab_run_id,
                 "status": "investigating",
                 "created_at": now,
                 "updated_at": now,
                 "completed_at": None,
                 "report_json": {},
                 "report_markdown": "",
+                "evidence_version": 3,
+                "assessment": None,
+                "recovery_origin": None,
             }
         )
         for name in ("log", "metrics", "event", "correlation", "report"):
             await self.store.upsert_agent_state(
                 investigation_id,
                 name,
-                {"findings": [], "steps": [], "status": "waiting", "started_at": None, "completed_at": None},
+                {"findings": [], "steps": [], "llm_runs": [], "status": "waiting", "started_at": None, "completed_at": None},
             )
 
-    def start(self, investigation_id: str, scenario: str) -> None:
-        self.tasks[investigation_id] = asyncio.create_task(self._run_initial(investigation_id, scenario))
+    def start(self, investigation_id: str) -> None:
+        self.tasks[investigation_id] = asyncio.create_task(self._run_initial(investigation_id))
 
-    async def _run_initial(self, investigation_id: str, scenario: str) -> None:
+    async def _run_initial(self, investigation_id: str) -> None:
         try:
-            if self.settings.simulation_warmup_seconds:
-                await asyncio.sleep(self.settings.simulation_warmup_seconds)
+            if self.settings.investigation_warmup_seconds:
+                await asyncio.sleep(self.settings.investigation_warmup_seconds)
+            document = await self.store.get_investigation(investigation_id)
+            if not document:
+                raise KeyError(investigation_id)
+            observation_start = datetime.fromisoformat(document["observation_start"].replace("Z", "+00:00"))
+            observation_end = datetime.fromisoformat(document["observation_end"].replace("Z", "+00:00"))
+            if document.get("lab_run_id"):
+                created_at = datetime.fromisoformat(document["created_at"].replace("Z", "+00:00"))
+                observation_start = created_at - timedelta(seconds=5)
+                observation_end = utc_now()
+                await self.store.update_investigation(
+                    investigation_id,
+                    {"observation_start": observation_start, "observation_end": observation_end},
+                )
             state: IncidentState = {
                 "incident_id": investigation_id,
-                "scenario": scenario,
+                "services": document["services"],
+                "symptom": document["symptom"],
                 "log_findings": [],
                 "metrics_findings": [],
                 "event_findings": [],
@@ -141,6 +290,9 @@ class InvestigationWorkflow:
                 "approval_result": "",
                 "agent_steps": [],
                 "status": "investigating",
+                "observation_start": str(observation_start.timestamp()),
+                "observation_end": str(observation_end.timestamp()),
+                "lab_run_id": document.get("lab_run_id"),
             }
             result = await asyncio.wait_for(
                 self.graph.ainvoke(state, config=self._config(investigation_id)), timeout=300
@@ -165,12 +317,13 @@ class InvestigationWorkflow:
         task = self.tasks.get(investigation_id)
         if task and not task.done():
             task.cancel()
+        await self.store.invalidate_pending_approvals(investigation_id, "investigation_cancelled")
         await self.store.update_investigation(investigation_id, {"status": "cancelled", "completed_at": utc_now()})
         await self.events.publish(investigation_id, {"type": "investigation", "status": "cancelled"})
 
     @staticmethod
     def _config(investigation_id: str) -> dict[str, Any]:
-        return {"configurable": {"thread_id": investigation_id}}
+        return {"configurable": {"thread_id": investigation_id}, "callbacks": []}
 
     async def _agent_step(self, incident_id: str, agent: str, step: str) -> None:
         await self.store.upsert_agent_state(incident_id, agent, {"status": "running", "started_at": utc_now()})
@@ -186,104 +339,389 @@ class InvestigationWorkflow:
         )
         await self.events.publish(incident_id, {"type": "agent_status", "agent": agent, "status": "completed", "findings": findings})
 
-    async def _log_agent(self, state: IncidentState) -> dict[str, Any]:
-        profile = SCENARIO_PROFILES[state["scenario"]]
-        await self._agent_step(state["incident_id"], "log", "Thought: inspect recent error streams for a shared failure signature")
-        await self._agent_step(state["incident_id"], "log", f"Action: query Loki with {profile['log_query']}")
-        response = await asyncio.to_thread(
-            query_loki.invoke,
-            {"query": profile["log_query"], "time_from": "now-5m", "time_to": "now"},
+    async def _run_agent(
+        self,
+        incident_id: str,
+        agent_name: str,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tools: list[Any],
+        response_schema: Any,
+        required_evidence_tools: set[str] | None = None,
+        observations: list[dict[str, Any]] | None = None,
+        max_tokens: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        await self._agent_step(incident_id, agent_name, f"Preparing bounded {agent_name} analysis for Groq")
+        await self.events.publish(
+            incident_id,
+            {"type": "llm_started", "agent": agent_name, "provider": "groq", "model": self.settings.groq_model},
         )
-        finding: Finding = {"timestamp": utc_iso(), "source": "loki", "message": profile["log_message"], "raw_data": response}
-        await self._agent_step(state["incident_id"], "log", f"Observation: {profile['log_message']}")
+        failure = None
+        async with self.llm_semaphore:
+            try:
+                output, audit = await self.llm.run(
+                    agent_name=agent_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    tools=tools,
+                    response_schema=response_schema,
+                    required_evidence_tools=required_evidence_tools,
+                    max_tokens=max_tokens,
+                )
+            except LLMUnavailable as exc:
+                failure = exc
+                audit = exc.audit
+                if audit is None:
+                    raise
+        if observations:
+            audit["observations"] = observations
+        states = await self.store.list_agent_states(incident_id)
+        current = next((item for item in states if item["agent_name"] == agent_name), {"llm_runs": []})
+        await self.store.upsert_agent_state(
+            incident_id,
+            agent_name,
+            {"llm_runs": [*current.get("llm_runs", []), audit], "execution_mode": audit["status"]},
+        )
+        for tool_call in audit.get("tool_calls", []):
+            await self.events.publish(incident_id, {"type": "tool_call", "agent": agent_name, **tool_call})
+        event_type = "llm_failed" if failure else "llm_completed"
+        await self.events.publish(
+            incident_id,
+            {"type": event_type, "agent": agent_name, "run": audit},
+        )
+        if failure:
+            await self.store.upsert_agent_state(incident_id, agent_name, {"status": "failed", "completed_at": utc_now()})
+            raise failure
+        await self._agent_step(incident_id, agent_name, "Groq response validated")
+        return output, audit
+
+    async def _collect_tool(
+        self,
+        incident_id: str,
+        agent_name: str,
+        evidence_tool: Any,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = {
+            "name": evidence_tool.name,
+            "arguments": arguments,
+            "result": None,
+            "status": "running",
+        }
+        await self.events.publish(
+            incident_id,
+            {"type": "tool_call", "agent": agent_name, **record},
+        )
+        try:
+            result = await asyncio.to_thread(evidence_tool.invoke, arguments)
+        except Exception as exc:
+            result = {
+                "status": "error",
+                "data": [],
+                "metadata": {"error": str(exc), "observed_at": utc_iso()},
+            }
+        record = {
+            **record,
+            "result": result,
+            "status": "completed" if result.get("status") == "success" else "error",
+        }
+        await self.events.publish(
+            incident_id,
+            {"type": "tool_result", "agent": agent_name, **record},
+        )
+        return record
+
+    @staticmethod
+    def _observation_prompt(state: IncidentState) -> str:
+        service_selector = "|".join(state["services"])
+        return json.dumps({
+            "task": "Investigate observed behavior without assuming a cause. Missing observations are not proof of health or failure.",
+            "services": state["services"],
+            "operator_reported_symptom": state["symptom"],
+            "time_from": state["observation_start"], "time_to": state["observation_end"],
+            "log_selector": f'{{service=~"{service_selector}"}}',
+            "available_metrics": ["http_requests_total", "http_request_duration_seconds_bucket", "postgres_query_duration_seconds_bucket", "redis_connections_total"],
+        }, separators=(",", ":"))
+
+    @staticmethod
+    def _observed_events(audit: dict[str, Any]) -> list[dict[str, Any]]:
+        events = []
+        for call in audit.get("tool_calls", []):
+            result = call.get("result") or {}
+            if call["name"] != "query_loki" or result.get("status") != "success":
+                continue
+            for stream in result.get("data", []):
+                for timestamp, raw in stream.get("values", []):
+                    recorded_at = datetime.fromtimestamp(int(timestamp) / 1e9, timezone.utc).isoformat()
+                    message = raw
+                    source = stream.get("stream", {}).get("service", "loki")
+                    try:
+                        payload = json.loads(raw)
+                    except (TypeError, json.JSONDecodeError):
+                        payload = None
+                    if isinstance(payload, dict):
+                        message = str(payload.get("message") or raw)
+                        source = str(payload.get("service") or source)
+                        if isinstance(payload.get("timestamp"), str):
+                            recorded_at = payload["timestamp"]
+                    events.append({"time": recorded_at, "event": message, "source": source})
+        return sorted(events, key=lambda event: event["time"])
+
+    async def _log_agent(self, state: IncidentState) -> dict[str, Any]:
+        context = json.loads(self._observation_prompt(state))
+        observations = [
+            await self._collect_tool(
+                state["incident_id"],
+                "log",
+                query_loki,
+                {
+                    "query": context["log_selector"],
+                    "time_from": state["observation_start"],
+                    "time_to": state["observation_end"],
+                },
+            )
+        ]
+        output, audit = await self._run_agent(
+            state["incident_id"],
+            "log",
+            system_prompt=(
+                "You are the log specialist for a controlled SRE investigation. Use at least one provided read-only "
+                "log observation, stay within the supplied interval, and return one concise finding supported by it. "
+                "Runtime errors are evidence; never infer health from an empty query."
+            ),
+            user_prompt=json.dumps({"context": context, "observations": observations}, default=str, separators=(",", ":")),
+            tools=[],
+            response_schema=AgentFindingOutput,
+            observations=observations,
+        )
+        finding: Finding = {
+            "finding_id": str(uuid.uuid4()),
+            "timestamp": utc_iso(),
+            "source": "loki",
+            "message": output["finding"],
+            "raw_data": {"observations": observations, "execution_mode": audit["status"], "insufficient_evidence": output["insufficient_evidence"], "events": self._observed_events({"tool_calls": observations})},
+        }
         await self._complete_agent(state["incident_id"], "log", [finding])
         return {"log_findings": [finding], "agent_steps": [{"agent": "log", "step": "Result: log evidence captured"}]}
 
     async def _metrics_agent(self, state: IncidentState) -> dict[str, Any]:
-        profile = SCENARIO_PROFILES[state["scenario"]]
-        await self._agent_step(state["incident_id"], "metrics", "Thought: compare current service indicators with the healthy baseline")
-        await self._agent_step(state["incident_id"], "metrics", f"Action: query Prometheus with {profile['metric_query']}")
-        response = await asyncio.to_thread(
-            query_prometheus.invoke,
-            {"query": profile["metric_query"], "time_from": "now-5m", "time_to": "now"},
+        context = json.loads(self._observation_prompt(state))
+        service_selector = "|".join(state["services"])
+        observations = [
+            await self._collect_tool(
+                state["incident_id"],
+                "metrics",
+                query_prometheus,
+                {
+                    "query": f'sum by (service, status) (http_requests_total{{service=~"{service_selector}"}})',
+                    "time_from": state["observation_start"],
+                    "time_to": state["observation_end"],
+                },
+            )
+        ]
+        output, audit = await self._run_agent(
+            state["incident_id"],
+            "metrics",
+            system_prompt=(
+                "You are the metrics specialist for a controlled SRE investigation. Use at least one provided read-only "
+                "metrics observation, inspect the supplied interval, and return one concise quantitative finding. "
+                "State when samples are missing or stale."
+            ),
+            user_prompt=json.dumps({"context": context, "observations": observations}, default=str, separators=(",", ":")),
+            tools=[],
+            response_schema=AgentFindingOutput,
+            observations=observations,
         )
-        finding: Finding = {"timestamp": utc_iso(), "source": "prometheus", "message": profile["metric_message"], "raw_data": response}
-        await self._agent_step(state["incident_id"], "metrics", f"Observation: {profile['metric_message']}")
+        finding: Finding = {
+            "finding_id": str(uuid.uuid4()),
+            "timestamp": utc_iso(),
+            "source": "prometheus",
+            "message": output["finding"],
+            "raw_data": {"observations": observations, "execution_mode": audit["status"], "insufficient_evidence": output["insufficient_evidence"]},
+        }
         await self._complete_agent(state["incident_id"], "metrics", [finding])
         return {"metrics_findings": [finding], "agent_steps": [{"agent": "metrics", "step": "Result: metric evidence captured"}]}
 
     async def _event_agent(self, state: IncidentState) -> dict[str, Any]:
-        profile = SCENARIO_PROFILES[state["scenario"]]
-        await self._agent_step(state["incident_id"], "event", "Thought: order changes and symptoms to test temporal causality")
-        now = utc_now()
-        raw_events = [
-            {"timestamp": (now - timedelta(seconds=20)).isoformat(), "message": f"Scenario {state['scenario']} activated", "source": "simulator", "severity": "warning"},
-            {"timestamp": now.isoformat(), "message": profile["event_message"], "source": "event-agent", "severity": "error"},
+        context = json.loads(self._observation_prompt(state))
+        collection_specs = [
+            (query_loki, {"query": context["log_selector"], "time_from": state["observation_start"], "time_to": state["observation_end"]}),
+            (inspect_runtime_resource, {"resource_id": "redis"}),
+            (inspect_runtime_resource, {"resource_id": "sample-api"}),
+            (inspect_database_blocking, {}),
+            (inspect_release_history, {}),
         ]
-        timeline = build_timeline.invoke({"events": raw_events})
-        finding: Finding = {"timestamp": utc_iso(), "source": "event-stream", "message": profile["event_message"], "raw_data": timeline}
-        await self._agent_step(state["incident_id"], "event", f"Observation: {profile['event_message']}")
+        observations = await asyncio.gather(
+            *(self._collect_tool(state["incident_id"], "event", evidence_tool, arguments) for evidence_tool, arguments in collection_specs)
+        )
+        output, audit = await self._run_agent(
+            state["incident_id"],
+            "event",
+            system_prompt=(
+                "You are the event and runtime specialist. Analyze the supplied Loki, redis, sample-api, database blocking, "
+                "and release-history observations. Preserve original timestamps and identities. "
+                "Never invent timestamps or infer causality from ordering alone. Use the supplied interval and state gaps explicitly."
+            ),
+            user_prompt=json.dumps({"context": context, "observations": observations}, default=str, separators=(",", ":")),
+            tools=[],
+            response_schema=AgentFindingOutput,
+            observations=observations,
+        )
+        finding: Finding = {
+            "finding_id": str(uuid.uuid4()),
+            "timestamp": utc_iso(),
+            "source": "loki",
+            "message": output["finding"],
+            "raw_data": {"events": self._observed_events({"tool_calls": observations}), "observations": observations, "execution_mode": audit["status"], "insufficient_evidence": output["insufficient_evidence"]},
+        }
         await self._complete_agent(state["incident_id"], "event", [finding])
         return {"event_findings": [finding], "agent_steps": [{"agent": "event", "step": "Result: incident timeline built"}]}
 
     async def _correlation_agent(self, state: IncidentState) -> dict[str, Any]:
         incident_id = state["incident_id"]
-        profile = SCENARIO_PROFILES[state["scenario"]]
-        await self._agent_step(incident_id, "correlation", "Thought: test competing hypotheses against all three evidence streams")
-        evidence = {"logs": state["log_findings"], "metrics": state["metrics_findings"], "events": state["event_findings"]}
-        hypotheses = [
-            "Redis dependency failure",
-            "Database query overload",
-            "Bad v2 deployment",
-            "Transient network degradation",
-        ]
-        ranked = rank_hypotheses.invoke({"hypotheses": hypotheses, "evidence": evidence})
-        generated = generate_root_cause.invoke({"evidence": {**evidence, "scenario": state["scenario"]}})
-        fallback = profile["root_cause"]
-        root_cause = await self.llm.complete(
-            "State one concise root cause from this evidence. Do not propose an action.\n" + json.dumps(evidence, default=str),
-            fallback,
-        )
-        summary = f"{profile['summary']} Cross-agent evidence converged on one causal chain."
-        approval_id = str(uuid.uuid4())
-        approval = {
-            "approval_id": approval_id,
-            "action_type": profile["action_type"],
-            "target": profile["target"],
-            "reason": root_cause,
-            "evidence": {**evidence, "hypotheses": ranked["data"], "synthesis": generated["data"]},
-            "proposed_by": "correlation",
-            "proposed_at": utc_iso(),
+        evidence = {
+            "logs": _compact_findings(state["log_findings"]),
+            "metrics": _compact_findings(state["metrics_findings"]),
+            "events": _compact_findings(state["event_findings"]),
         }
-        await self.store.create_approval(
-            {**approval, "investigation_id": incident_id, "status": "pending", "created_at": utc_now(), "decided_at": None}
+        valid_finding_ids = {finding["finding_id"] for group in evidence.values() for finding in group}
+        valid_observation_ids = _observation_ids(evidence)
+        output, audit = await self._run_agent(
+            incident_id,
+            "correlation",
+            system_prompt=(
+                "You are the correlation specialist. Develop competing hypotheses from the observations. "
+                "Hypothesis supporting_finding_ids and action supporting_finding_ids must contain only supplied finding IDs. "
+                "Action supporting_observation_ids must contain only supplied observation IDs for the exact infrastructure identity. "
+                "Explain limitations and contradictions. Never manufacture confidence scores. "
+                "Select an action from the supplied operation catalog only if supported by cited findings and an observed, stable resource identity. "
+                "Copy container IDs, image IDs, database PIDs, and backend start times exactly from tool observations. "
+                "Otherwise return proposed_action=null. Classify the result as incident_detected, no_incident_observed, or insufficient_evidence. "
+                "A healthy classification requires populated recent observations. Do not execute actions. "
+                "Return at most two hypotheses. Keep every explanation and limitation to one sentence and the total response terse."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "available_lab_actions": LAB_ACTIONS,
+                    "valid_finding_ids": sorted(valid_finding_ids),
+                    "valid_observation_ids": sorted(valid_observation_ids),
+                    "evidence": evidence,
+                },
+                default=str,
+            ),
+            tools=[],
+            response_schema=CorrelationOutput,
+            max_tokens=1536,
         )
-        await self._agent_step(incident_id, "correlation", f"Result: {root_cause}")
+        root_cause = output["root_cause"]
+        summary = output["summary"]
+        cited_ids = {citation for hypothesis in output["hypotheses"] for citation in hypothesis["supporting_finding_ids"]}
+        if not cited_ids <= valid_finding_ids:
+            raise ValueError("Correlation cited evidence that does not exist")
+        action = output["proposed_action"]
+        approval = None
+        if output["assessment"] == "insufficient_evidence":
+            output["insufficient_evidence"] = True
+        if action and output["assessment"] == "incident_detected" and not output["insufficient_evidence"]:
+            if not cited_ids:
+                raise ValueError("Remediation requires cited observations")
+            if not set(action["supporting_finding_ids"]) <= valid_finding_ids:
+                raise ValueError("Proposed action cited findings that do not exist")
+            if not set(action["supporting_observation_ids"]) <= valid_observation_ids:
+                raise ValueError("Proposed action cited infrastructure observations that do not exist")
+            self._validate_action_observations(action, evidence)
+            parameters = self._validate_action(action, evidence)
+            approval = {
+                "approval_id": str(uuid.uuid4()),
+                "action_type": action["action_type"],
+                "target": action["resource_id"],
+                "parameters": parameters,
+                "supporting_finding_ids": action["supporting_finding_ids"],
+                "supporting_observation_ids": action["supporting_observation_ids"],
+                "description": LAB_ACTIONS[action["action_type"]]["description"],
+                "reason": output["recommendation"],
+                "evidence": {**evidence, "hypotheses": output["hypotheses"]},
+                "proposed_by": "correlation",
+                "proposed_at": utc_iso(),
+                "evidence_version": 3,
+                "expires_at": (utc_now() + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            }
+            await self.store.create_approval(
+                {**approval, "investigation_id": incident_id, "status": "pending", "created_at": utc_now(), "decided_at": None}
+            )
         await self._complete_agent(
             incident_id,
             "correlation",
-            [{"timestamp": utc_iso(), "source": "cross-agent", "message": root_cause, "raw_data": approval["evidence"]}],
+            [{"finding_id": str(uuid.uuid4()), "timestamp": utc_iso(), "source": "cross-agent", "message": root_cause, "raw_data": {"hypotheses": output["hypotheses"], "execution_mode": audit["status"], "insufficient_evidence": output["insufficient_evidence"]}}],
         )
-        await self.events.publish(incident_id, {"type": "approval", "approval": approval, "status": "pending"})
+        if approval:
+            await self.events.publish(incident_id, {"type": "approval", "approval": approval, "status": "pending"})
         return {
             "correlation_summary": summary,
             "root_cause": root_cause,
-            "affected_services": profile["affected"],
+            "affected_services": output["affected_services"],
+            "recommendation": output["recommendation"],
+            "insufficient_evidence": output["insufficient_evidence"],
+            "assessment": output["assessment"],
             "pending_approval": approval,
-            "status": "awaiting_approval",
-            "agent_steps": [{"agent": "correlation", "step": "Action: request human approval for remediation"}],
+            "status": "awaiting_approval" if approval else "investigating",
+            "agent_steps": [{"agent": "correlation", "step": "Remediation proposed" if approval else "No supported remediation proposed"}],
         }
 
-    def _approval_node(self, state: IncidentState, config: RunnableConfig) -> dict[str, Any]:
+    @staticmethod
+    def _validate_action_observations(action: dict[str, Any], evidence: dict[str, Any]) -> None:
+        index = _index_observation_ids(evidence)
+        cited = [index[identifier] for identifier in action["supporting_observation_ids"]]
+        serialized = json.dumps(cited, default=str)
+        required = [action["resource_id"]]
+        if action["action_type"] == "start_service":
+            required.append(action.get("expected_container_id"))
+        elif action["action_type"] == "terminate_blocking_session":
+            required.extend((action.get("database"), action.get("pid"), action.get("backend_start")))
+        else:
+            required.extend(
+                (
+                    action.get("expected_container_id"),
+                    action.get("expected_current_image_id"),
+                    action.get("previous_image_id"),
+                )
+            )
+        if any(value is None or str(value) not in serialized for value in required):
+            raise ValueError("Proposed action identities are not supported by its cited infrastructure observations")
+
+    @staticmethod
+    def _validate_action(action: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
+        serialized = json.dumps(evidence, default=str)
+        resource_id = action["resource_id"]
+        if resource_id not in serialized:
+            raise ValueError("Proposed action resource was not observed")
+        if action["action_type"] == "start_service":
+            container_id = action.get("expected_container_id")
+            if resource_id != "redis" or not container_id or container_id not in serialized:
+                raise ValueError("Starting a service requires the observed stopped Redis container identity")
+            return {"resource_id": resource_id, "expected_container_id": container_id}
+        if action["action_type"] == "terminate_blocking_session":
+            database, pid, backend_start = action.get("database"), action.get("pid"), action.get("backend_start")
+            if database != "incident_db" or pid is None or str(pid) not in serialized or not backend_start or backend_start not in serialized:
+                raise ValueError("Terminating a session requires its observed database, PID, and backend start time")
+            return {"resource_id": resource_id, "database": database, "pid": pid, "backend_start": backend_start}
+        expected_container_id = action.get("expected_container_id")
+        current_image = action.get("expected_current_image_id")
+        previous_image = action.get("previous_image_id")
+        if resource_id != "sample-api" or not all((expected_container_id, current_image, previous_image)):
+            raise ValueError("Rollback requires observed current container and current/previous image identities")
+        if not all(value in serialized for value in (expected_container_id, current_image, previous_image)):
+            raise ValueError("Rollback identities were not present in observed release evidence")
+        return {"resource_id": resource_id, "expected_container_id": expected_container_id, "expected_current_image_id": current_image, "previous_image_id": previous_image}
+
+    async def _approval_node(self, state: IncidentState, config: RunnableConfig) -> dict[str, Any]:
         """Pure interrupt gate; side effects live in the following node for resume safety."""
-        # LangGraph documents async context propagation as Python 3.11+.
-        # CI may run 3.10, where a sync node executed by ainvoke loses the contextvar.
-        token = var_child_runnable_config.set(config) if sys.version_info < (3, 11) else None
+        token = var_child_runnable_config.set(config)
         try:
             approved = interrupt(state["pending_approval"])
         finally:
-            if token is not None:
-                var_child_runnable_config.reset(token)
+            var_child_runnable_config.reset(token)
         decision = "approved" if approved else "rejected"
         return {"approval_result": decision, "status": "investigating" if approved else "completed_with_rejection"}
 
@@ -304,46 +742,61 @@ class InvestigationWorkflow:
     async def _execute_remediation(self, state: IncidentState) -> dict[str, Any]:
         await self.events.publish(state["incident_id"], {"type": "remediation", "status": "running"})
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                if state["scenario"] == "redis-failure":
-                    payload, path = {"enabled": False}, "/api/simulate/redis-failure"
-                elif state["scenario"] == "slow-db":
-                    payload, path = {"enabled": False}, "/api/simulate/slow-db"
-                else:
-                    payload, path = {"version": "v1"}, "/api/simulate/bad-deployment"
-                targets = [self.settings.sample_api_url]
-                if state["scenario"] != "slow-db":
-                    targets.append(self.settings.sample_payment_url)
-                responses = await asyncio.gather(*(client.post(f"{target}{path}", json=payload) for target in targets))
-                for response in responses:
-                    response.raise_for_status()
-                result = {"status": "success", "targets": targets, "action": path}
+            approval = state["pending_approval"]
+            if not approval or state.get("approval_result") != "approved" or approval.get("evidence_version") != 3:
+                raise ValueError("A current, approved evidence-backed action is required")
+            action_id = approval["approval_id"]
+            baseline = await collect_telemetry(self.settings, state["services"])
+            operation = await self.lab.execute(
+                action_id,
+                state["incident_id"],
+                approval["action_type"],
+                approval["parameters"],
+            )
+            if operation["status"] != "succeeded":
+                result = {"status": operation["status"], "operation": operation, "recovery_origin": "agent_action", "completed_at": utc_iso()}
+            else:
+                action = {"action_type": approval["action_type"], **approval["parameters"]}
+                verification = await verify_recovery(self.settings, self.lab, action, state["services"], baseline)
+                if state.get("lab_run_id"):
+                    await self.lab.complete_run(state["lab_run_id"], action_id, verification)
+                result = {
+                    "status": "success" if verification["passed"] else "verification_failed",
+                    "operation": operation,
+                    "verification": verification,
+                    "recovery_origin": "agent_action",
+                    "completed_at": utc_iso(),
+                }
         except Exception as exc:
-            result = {"status": "error", "error": str(exc)}
+            result = {"status": "error", "error": str(exc), "recovery_origin": "agent_action", "completed_at": utc_iso()}
         await self.events.publish(state["incident_id"], {"type": "remediation", **result})
         return {"execution_result": result}
 
     async def _report_agent(self, state: IncidentState) -> dict[str, Any]:
-        profile = SCENARIO_PROFILES[state["scenario"]]
-        await self._agent_step(state["incident_id"], "report", "Thought: preserve the conclusion, evidence, action, and timeline")
-        report = self._build_report(state, profile["recommendation"])
+        report, audit = await self._generate_report(state, state.get("recommendation", ""))
+        assessment = state.get("assessment", "insufficient_evidence")
+        status = "no_incident_observed" if assessment == "no_incident_observed" else "inconclusive" if assessment == "insufficient_evidence" or state.get("insufficient_evidence") else "completed"
+        if state.get("execution_result", {}).get("status") not in (None, "success"):
+            status = "remediation_failed"
         markdown = format_report.invoke({"data": report, "format": "markdown"})["data"]["report"]
         await self._complete_agent(
-            state["incident_id"], "report", [{"timestamp": utc_iso(), "source": "report", "message": report["summary"], "raw_data": report}]
+            state["incident_id"], "report", [{"finding_id": str(uuid.uuid4()), "timestamp": utc_iso(), "source": "report", "message": report["summary"], "raw_data": {**report, "execution_mode": audit["status"]}}]
         )
         await self.store.update_investigation(
             state["incident_id"],
-            {"status": "completed", "completed_at": utc_now(), "report_json": report, "report_markdown": markdown},
+            {"status": status, "assessment": assessment, "completed_at": utc_now(), "report_json": report, "report_markdown": markdown, "recovery_origin": state.get("execution_result", {}).get("recovery_origin")},
         )
-        await self.events.publish(state["incident_id"], {"type": "investigation", "status": "completed", "report": report})
-        return {"report_json": report, "report_markdown": markdown, "status": "completed", "pending_approval": None}
+        await self.events.publish(state["incident_id"], {"type": "investigation", "status": status, "report": report})
+        return {"report_json": report, "report_markdown": markdown, "status": status, "pending_approval": None}
 
     async def _rejected_report(self, state: IncidentState) -> dict[str, Any]:
-        await self._agent_step(state["incident_id"], "report", "Result: remediation rejected; close without executing an action")
-        report = self._build_report(state, "Remediation was rejected by the operator; no operational action was executed.")
+        report, audit = await self._generate_report(
+            state,
+            "Remediation was rejected by the operator; no operational action was executed.",
+        )
         markdown = format_report.invoke({"data": report, "format": "markdown"})["data"]["report"]
         await self._complete_agent(
-            state["incident_id"], "report", [{"timestamp": utc_iso(), "source": "report", "message": report["summary"], "raw_data": report}]
+            state["incident_id"], "report", [{"finding_id": str(uuid.uuid4()), "timestamp": utc_iso(), "source": "report", "message": report["summary"], "raw_data": {**report, "execution_mode": audit["status"]}}]
         )
         await self.store.update_investigation(
             state["incident_id"],
@@ -351,6 +804,88 @@ class InvestigationWorkflow:
         )
         await self.events.publish(state["incident_id"], {"type": "investigation", "status": "completed_with_rejection", "report": report})
         return {"report_json": report, "report_markdown": markdown, "status": "completed_with_rejection", "pending_approval": None}
+
+    async def _generate_report(self, state: IncidentState, recommendation: str) -> tuple[ReportJSON, dict[str, Any]]:
+        draft = self._build_report(state, recommendation)
+        evidence = draft["evidence"]
+        output, audit = await self._run_agent(
+            state["incident_id"],
+            "report",
+            system_prompt=(
+                "You are the incident report specialist. Preserve the supplied evidence and decision outcome, "
+                "write a concise report, and never claim an action succeeded unless execution evidence says so. "
+                "If verification is absent, failed, or unverified, explicitly call recovery unverified and do not describe the services as healthy, recovered, or restored."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "correlation": {
+                        "summary": draft["summary"],
+                        "root_cause": draft["root_cause"],
+                        "recommendation": draft["recommendation"],
+                        "affected_services": draft["affected_services"],
+                    },
+                    "findings": [
+                        {key: finding.get(key) for key in ("finding_id", "source", "message")}
+                        for finding in [*state["log_findings"], *state["metrics_findings"], *state["event_findings"]]
+                    ],
+                    "execution": state.get("execution_result"),
+                    "approval_result": state["approval_result"],
+                },
+                default=str,
+                separators=(",", ":"),
+            ),
+            tools=[],
+            response_schema=ReportOutput,
+        )
+        report: ReportJSON = {
+            "summary": output["summary"],
+            "root_cause": output["root_cause"],
+            "evidence": evidence,
+            "recommendation": output["recommendation"],
+            "affected_services": output["affected_services"],
+            "timeline": draft["timeline"],
+        }
+        return report, audit
+
+    async def answer_question(self, investigation_id: str, question: str) -> dict[str, Any]:
+        investigation = await self.store.get_investigation(investigation_id)
+        if not investigation:
+            raise KeyError(investigation_id)
+        agents = await self.store.list_agent_states(investigation_id)
+        findings = [
+            {**{key: finding.get(key) for key in ("finding_id", "timestamp", "source", "message")}, "agent": agent["agent_name"]}
+            for agent in agents
+            for finding in agent.get("findings", [])
+        ]
+        if not findings:
+            raise ValueError("No investigation evidence is available yet.")
+        output, audit = await self.llm.run(
+            agent_name="question",
+            system_prompt=(
+                "Answer only from the supplied investigation evidence. Cite finding_id values exactly. "
+                "If the evidence cannot answer the question, set insufficient_evidence to true and explain the gap."
+            ),
+            user_prompt=json.dumps({"question": question, "evidence": findings}, default=str),
+            tools=[],
+            response_schema=QuestionOutput,
+        )
+        valid_ids = {finding.get("finding_id") for finding in findings}
+        citations = output["citations"]
+        if any(citation not in valid_ids for citation in citations) or (not citations and not output["insufficient_evidence"]):
+            raise LLMUnavailable("The answer did not cite valid investigation evidence; retry the question.")
+        document = {
+            "question_id": str(uuid.uuid4()),
+            "investigation_id": investigation_id,
+            "question": question,
+            "answer": output["answer"],
+            "citations": citations,
+            "insufficient_evidence": output["insufficient_evidence"],
+            "llm_run": audit,
+            "created_at": utc_now(),
+        }
+        await self.store.create_question(document)
+        await self.events.publish(investigation_id, {"type": "question_answered", "question": document})
+        return document
 
     @staticmethod
     def _build_report(state: IncidentState, recommendation: str) -> ReportJSON:
@@ -361,7 +896,7 @@ class InvestigationWorkflow:
             "evidence": {"logs": state["log_findings"], "metrics": state["metrics_findings"], "events": state["event_findings"], "execution": state.get("execution_result")},
             "recommendation": recommendation,
             "affected_services": state["affected_services"],
-            "timeline": [{"time": finding["timestamp"], "event": finding["message"], "source": finding["source"]} for finding in sorted(findings, key=lambda item: item["timestamp"])],
+            "timeline": sorted({(event["time"], event["event"], event["source"]): event for finding in findings for event in finding["raw_data"].get("events", [])}.values(), key=lambda event: event["time"]),
         }
 
     async def _fail(self, investigation_id: str, exc: Exception) -> None:

@@ -2,288 +2,161 @@
 
 # SREs
 
-### An evidence-first incident response agent built with LangGraph
+### Evidence-first incident response with LangGraph and human approval
 
-SREs turns a controlled service failure into a traceable investigation: specialist agents inspect logs, metrics, and events in parallel; a correlation agent proposes a root cause; a human approves or rejects remediation; and a report agent preserves the full decision trail.
+SREs is a local incident lab where Groq-backed agents investigate real failures in bundled services, propose a bounded operational action, pause for human approval, and verify recovery from fresh application and telemetry observations.
 
-[Quick start](#quick-start) · [Agent workflow](#agent-workflow) · [Architecture](#system-architecture) · [API](#api-walkthrough) · [Tests](#testing)
+[Quick start](#quick-start) · [Scenarios](#real-lab-scenarios) · [Architecture](#architecture) · [API](#api-walkthrough) · [Tests](#testing)
 
 </div>
 
-> [!NOTE]
-> SREs is a local SRE laboratory. It only changes failure flags inside the bundled sample services. It does not mount the Docker socket or operate arbitrary host infrastructure.
+> [!IMPORTANT]
+> This is a controlled local lab, not a production SRE platform. Its incidents are deliberately selected, but the underlying failures are real Docker, PostgreSQL, and release changes. The lab controller mounts the Docker socket and must run only on a disposable, dedicated environment.
 
-## What SREs demonstrates
+## What is real
 
-- **Parallel evidence collection** — Log, Metrics, and Event agents fan out from a shared `IncidentState` and join before correlation.
-- **Grounded analysis** — findings retain their timestamp, source, message, and raw Loki or Prometheus response.
-- **Human-in-the-loop safety** — LangGraph's `interrupt()` pauses every remediation and resumes the same investigation from its checkpoint after a decision.
-- **Durable execution** — graph checkpoints, investigations, approvals, agent state, and reports are persisted in MongoDB.
-- **Live operations UX** — FastAPI emits Server-Sent Events (SSE) to a Next.js dashboard as agent steps and state changes happen.
-- **Reproducible by default** — deterministic correlation makes the complete demo work without an LLM key; OpenAI, Gemini, or Groq can optionally refine the root-cause statement.
-- **Real observability signals** — two instrumented FastAPI services continuously publish Prometheus metrics and structured Loki logs.
+- The sample API and payment service continuously make real HTTP, Redis, and PostgreSQL calls.
+- Prometheus scrapes measured request counters and latency histograms. Loki stores application logs with original timestamps.
+- A Redis run stops the actual allowlisted Redis container.
+- A database run holds a real PostgreSQL relation lock from an identifiable backend session.
+- A release run replaces the sample API container with a separately built v2 image containing a real `KeyError` regression.
+- Every visible Log, Metrics, Event, Correlation, and Report result requires a Groq response. Missing credentials, invalid structured output, or unavailable evidence fail closed; runtime code has no canned diagnosis or fallback report.
+- Approved actions execute through a private controller and are checked against the exact observed container, image, database PID, and backend start time.
+- Recovery requires three consecutive successful application rounds, the action-specific infrastructure postcondition, and fresh acceptable Prometheus telemetry.
+
+The business records and workload are fixtures. Payment probes are explicitly lab records; no external payment provider is contacted.
 
 ## Agent workflow
 
-SREs uses five user-visible specialist agents. LangGraph also contains control nodes for the approval gate, decision recording, and remediation execution.
-
 ```mermaid
 flowchart TD
-    START((START))
-    LOG[Log agent<br/>Query Loki]
-    METRICS[Metrics agent<br/>Query Prometheus]
-    EVENT[Event agent<br/>Build timeline]
-    CORRELATE[Correlation agent<br/>Rank hypotheses and identify root cause]
-    APPROVAL[Approval gate<br/>interrupt and checkpoint]
-    RECORD[Record human decision]
-    ROUTE{Approved?}
-    EXECUTE[Execute controlled remediation]
-    REPORT[Report agent<br/>Complete incident report]
-    REJECTED[Report agent<br/>Close without remediation]
-    END_OK((END))
-    END_NO((END))
-
-    START --> LOG
-    START --> METRICS
-    START --> EVENT
-    LOG --> CORRELATE
+    START((START)) --> LOG[Log agent]
+    START --> METRICS[Metrics agent]
+    START --> EVENT[Event agent]
+    LOG --> CORRELATE[Correlation agent]
     METRICS --> CORRELATE
     EVENT --> CORRELATE
-    CORRELATE --> APPROVAL
-    APPROVAL -. resume .-> RECORD
-    RECORD --> ROUTE
-    ROUTE -- Yes --> EXECUTE
-    EXECUTE --> REPORT
-    REPORT --> END_OK
-    ROUTE -- No --> REJECTED
-    REJECTED --> END_NO
+    CORRELATE -->|supported action| APPROVAL[Human approval interrupt]
+    CORRELATE -->|no supported action| REPORT[Report agent]
+    APPROVAL -->|approved| EXECUTE[Controller operation]
+    APPROVAL -->|rejected| REJECTED[Rejection report]
+    EXECUTE --> VERIFY[Functional, resource, telemetry checks]
+    VERIFY --> REPORT
+    REPORT --> END((END))
+    REJECTED --> END
 ```
 
-The three collector nodes use a `RetryPolicy` with up to three attempts for transient node exceptions; tool-level failures are returned as structured evidence. Their list fields use LangGraph reducers, so parallel findings and agent steps accumulate instead of overwriting one another.
+Log, Metrics, and Event collectors gather scenario-independent evidence. The selected lab scenario and private injection record are not included in their model prompts. Correlation must cite valid finding IDs and infrastructure observation IDs; the cited observation payload must contain every frozen action identity.
 
-### Investigation lifecycle
+The LangGraph interrupt is side-effect free. Approval is reserved atomically, the graph resumes from its MongoDB checkpoint, and the execution node sends only the already approved parameters.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Operator
-    participant UI as Next.js dashboard
-    participant API as FastAPI API
-    participant Apps as Sample services
-    participant Graph as LangGraph workflow
-    participant Obs as Prometheus and Loki
-    participant DB as MongoDB
+## Real lab scenarios
 
-    Operator->>UI: Select a failure scenario
-    UI->>API: POST /simulate/{scenario}
-    API->>Apps: Enable controlled failure
-    API->>DB: Create investigation and agent records
-    API-->>UI: 202 + investigation ID
-    UI->>API: Open SSE investigation stream
-    API->>Graph: Start with IncidentState
-    par Collect evidence
-        Graph->>Obs: Query logs
-        Graph->>Obs: Query metrics
-        Graph->>Graph: Build event timeline
-    end
-    Graph->>Graph: Correlate evidence and rank hypotheses
-    Graph->>DB: Persist approval and checkpoint
-    Graph-->>UI: Approval required
-    Operator->>UI: Approve or reject
-    UI->>API: POST approval decision
-    API->>Graph: Resume checkpoint with Command
-    alt Approved
-        Graph->>Apps: Disable failure or roll back to v1
-        Graph->>DB: Store completed report
-    else Rejected
-        Graph->>DB: Store rejection report, no action executed
-    end
-    Graph-->>UI: Stream terminal status and report
-```
-
-### Shared graph state
-
-Every node receives the same typed `IncidentState` and returns only the fields it updates.
-
-| State group | Representative fields | Produced by |
-| --- | --- | --- |
-| Identity | `incident_id`, `scenario`, `status` | API / workflow |
-| Evidence | `log_findings`, `metrics_findings`, `event_findings` | Collector agents |
-| Analysis | `correlation_summary`, `root_cause`, `affected_services` | Correlation agent |
-| Safety | `pending_approval`, `approval_result`, `execution_result` | Approval and remediation nodes |
-| Output | `report_json`, `report_markdown` | Report agent |
-| Activity | `agent_steps` | All specialist agents |
-
-## Controlled scenarios
-
-| Scenario | Injected failure | Evidence collected | Proposed remediation |
+| Scenario | Injected failure | Observable symptom | Allowed recovery |
 | --- | --- | --- | --- |
-| `redis-failure` | Redis access is disabled in both sample services | Connection errors, HTTP 500 rate, dependency timeline | Restore Redis-backed behavior and verify both services |
-| `slow-db` | API database calls are delayed by about eight seconds | Slow-query logs and PostgreSQL/API p95 latency | Disable slow-query mode and verify latency returns to baseline |
-| `bad-deployment` | Both sample services switch from `v1` to broken `v2` behavior | Deployment logs, HTTP 500 ratio, event ordering | Roll the sample services back to `v1` |
+| `redis-unavailable` | Stop the allowlisted Compose Redis container | Real dependency exceptions and 5xx responses in both sample services | Start that same observed container ID |
+| `database-blocking` | Hold `ACCESS EXCLUSIVE` on `users` from a dedicated PostgreSQL session | The actual application `SELECT` waits and times out | Terminate the observed lab blocker after PID/start-time revalidation |
+| `release-regression` | Replace sample API v1 with a prepared v2 image | `/api/products` raises a real `KeyError` and returns 503 | Replace the observed v2 container with the prepared, previously observed v1 image |
 
-All three remediations are simulations. Approval changes only the in-process state of `sample-api` and `sample-payment`.
+A run has a maximum 15-minute lifetime. Rejection performs no remediation; explicit cleanup or the controller watchdog restores the bounded lab state and records that recovery separately from agent action.
 
-## System architecture
+## Architecture
 
 ```mermaid
 flowchart LR
-    USER[Operator browser]
-
-    subgraph EXPERIENCE[Application]
-        WEB[Next.js dashboard<br/>port 3000]
-        API[FastAPI API and SSE<br/>port 8000]
-        GRAPH[LangGraph investigation]
-        HUB[In-memory event hub]
-    end
-
-    subgraph TELEMETRY[Observability]
-        PROM[Prometheus<br/>metrics]
-        LOKI[Loki<br/>logs]
-    end
-
-    subgraph LAB[Instrumented lab]
-        SAMPLE_API[Sample API]
-        SAMPLE_PAY[Sample payment]
-        REDIS[(Redis)]
-        POSTGRES[(PostgreSQL)]
-    end
-
-    MONGO[(MongoDB<br/>records and checkpoints)]
-
-    USER <-->|HTTP| WEB
-    WEB <-->|REST and SSE| API
-    API --> GRAPH
-    GRAPH --> HUB
-    HUB --> API
-    GRAPH -->|queries| PROM
-    GRAPH -->|queries| LOKI
-    GRAPH -->|approved recovery only| SAMPLE_API
-    GRAPH -->|approved recovery only| SAMPLE_PAY
-    GRAPH <-->|state and checkpoints| MONGO
-    SAMPLE_API -->|metrics| PROM
-    SAMPLE_PAY -->|metrics| PROM
-    SAMPLE_API -->|structured logs| LOKI
-    SAMPLE_PAY -->|structured logs| LOKI
-    SAMPLE_API --> REDIS
-    SAMPLE_API --> POSTGRES
-    SAMPLE_PAY --> REDIS
+    BROWSER[Next.js browser] --> API[FastAPI + LangGraph]
+    API <--> MONGO[(MongoDB records + checkpoints)]
+    API --> GROQ[Groq]
+    API --> PROM[Prometheus]
+    API --> LOKI[Loki]
+    API -->|monitor/operator tokens| CTRL[Private lab controller]
+    CTRL -->|fixed allowlisted operations| DOCKER[Docker socket]
+    CTRL --> POSTGRES[(PostgreSQL control role)]
+    APPS[Sample API + payment] --> REDIS[(Redis)]
+    APPS --> POSTGRES
+    APPS --> PROM
+    APPS --> LOKI
 ```
 
-### Technology stack
+### Trust boundaries
 
-| Layer | Technologies |
-| --- | --- |
-| Agent runtime | Python 3.11, LangGraph, LangChain tools |
-| API and streaming | FastAPI, Uvicorn, SSE |
-| Dashboard | Next.js 16, React 19, TypeScript, SWR |
-| Persistence | MongoDB plus `MongoDBSaver` checkpoints |
-| Observability | Prometheus metrics, Loki structured logs |
-| Sample dependencies | Redis 7, PostgreSQL 16 |
-| Local runtime | Docker Compose |
+- Only `lab-controller` receives `/var/run/docker.sock`; the browser, backend agents, and model do not.
+- Monitoring and operator credentials are separate server-only values. Neither is exposed through `NEXT_PUBLIC_*`, API records, or model audits.
+- Docker resources must match the configured Compose project and service allowlist.
+- The controller accepts a fixed action union. It does not accept shell commands, SQL strings, arbitrary images, mount paths, or arbitrary Docker options.
+- PostgreSQL uses separate application, observation, and lab-controller roles. Session termination is limited to the controlled lab blocker.
+- Operation IDs are approval IDs, making controller requests idempotent. Every operation stores requested/running/final state and before/after observations.
+- Container replacement keeps the previous container staged until the replacement is created, connected, and started; a failed swap restores the previous container.
+
+The Docker socket is still host-privileged. Authentication and allowlists reduce application risk but are not a security boundary against a compromised controller process.
 
 ## Quick start
 
 ### Prerequisites
 
 - Docker Engine with Docker Compose v2
-- At least 4 GB of memory available to Docker
-- `make`, Python 3, and Node.js only if you want to run the test suites on the host
+- Python 3.11+, Node.js, and `make` for host-side tests
+- A Groq API key
 
-### 1. Configure the environment
+### Configure and start
 
 ```bash
 cp .env.example .env
+# Set GROQ_API_KEY and replace both LAB_*_TOKEN values with different random values.
+make prepare-releases
+docker compose up --build -d
 ```
 
-The defaults run the full project in deterministic mode. No API key is required.
+`make prepare-releases` builds immutable local `sres-sample-api:v1` and `:v2` images before the release scenario is available. `postgres-bootstrap` idempotently provisions the restricted database roles even when an existing data volume is reused.
 
-### 2. Start the lab
-
-```bash
-docker compose up --build
-```
-
-Compose builds the application containers, waits for their dependencies to become healthy, and starts all nine services. The sample services need a few seconds to generate enough telemetry for an investigation.
-
-### 3. Open SREs
+Open:
 
 | Service | URL |
 | --- | --- |
-| Operations dashboard | <http://localhost:3000> |
-| Interactive API docs | <http://localhost:8000/docs> |
+| Dashboard | <http://localhost:3001> |
+| API docs | <http://localhost:8000/docs> |
 | Prometheus | <http://localhost:9090> |
-| Loki API | <http://localhost:3100> |
+| Loki | <http://localhost:3100> |
 
-In the dashboard, choose **Simulate**, start one of the three scenarios, watch the agent activity stream, and review the approval request. Approving resumes the graph and performs the controlled recovery; rejecting produces a final report without executing remediation.
+Use **Incident lab** to start a bounded fault, or start a manual investigation without injecting anything. Review the observed identities and provenance references before approving an operation.
 
-### 4. Stop the lab
-
-```bash
-docker compose down
-```
-
-Named volumes preserve MongoDB records and telemetry between runs. To intentionally remove them too, use `docker compose down -v`.
+Stop the stack with `docker compose down`. Named volumes preserve records. Use `docker compose down -v` only when you intentionally want to delete local data.
 
 ## Configuration
 
-Edit `.env` before starting Compose.
+Important values are documented in [`.env.example`](.env.example):
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `LLM_PROVIDER` | `deterministic` | `deterministic`, `openai`, `gemini`, or `groq` |
-| `OPENAI_API_KEY` | empty | Enables OpenAI-assisted root-cause phrasing |
-| `GEMINI_API_KEY` | empty | Enables Gemini-assisted root-cause phrasing |
-| `GROQ_API_KEY` | empty | Enables Groq-assisted root-cause phrasing |
-| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model used for root-cause phrasing |
-| `LANGSMITH_TRACING` | `false` | Enables LangSmith tracing when set to `true` |
-| `LANGSMITH_API_KEY` | empty | Authenticates LangSmith tracing |
-| `LANGSMITH_PROJECT` | `sres-incident-response` | LangSmith project name |
-| `SIMULATION_WARMUP_SECONDS` | `10` | Telemetry warm-up before graph execution |
-| `FRONTEND_HOST_PORT` | `3000` | Dashboard host port |
-| `BACKEND_HOST_PORT` | `8000` | API host port |
+| Variable | Purpose |
+| --- | --- |
+| `GROQ_API_KEY`, `GROQ_MODEL` | Required model connection used by every specialist |
+| `GROQ_MAX_TOKENS` | Default bounded output limit; correlation uses a slightly larger explicit schema budget |
+| `LAB_MONITOR_TOKEN` | Read-only controller observations |
+| `LAB_OPERATOR_TOKEN` | Fault injection, cleanup, and approved operations |
+| `INVESTIGATION_WARMUP_SECONDS` | Neutral telemetry warm-up before collection |
+| `VERIFICATION_*` | Consecutive rounds, interval, and maximum recovery window |
+| `COMPOSE_PROJECT_NAME` | Project identity used by controller resource resolution |
 
-The remaining host bindings are documented in [`.env.example`](.env.example). Container-to-container addresses remain unchanged when a host port is customized.
-
-### Optional LLM providers
-
-Deterministic mode remains the source of the scenario evidence and recovery logic. When `openai`, `gemini`, or `groq` is configured with a key, the provider is used only to refine the concise root-cause statement; failures automatically fall back to the deterministic result.
-
-For example:
-
-```dotenv
-LLM_PROVIDER=openai
-OPENAI_API_KEY=your-key
-```
-
-To use Groq instead:
-
-```dotenv
-LLM_PROVIDER=groq
-GROQ_API_KEY=gsk_your-key
-```
-
-For observability in LangSmith:
-
-```dotenv
-LANGSMITH_TRACING=true
-LANGSMITH_API_KEY=your-key
-LANGSMITH_PROJECT=sres-incident-response
-```
+The backend and controller use host networking for local provider and published-service access. The controller listens only on `127.0.0.1:8010`; it is intentionally absent from the public Compose port list.
 
 ## API walkthrough
 
-The dashboard is the intended operator experience, but the complete lifecycle is also available over HTTP.
-
-Start an investigation:
+Start a real controlled release incident:
 
 ```bash
-curl -sS -X POST http://localhost:8000/simulate/bad-deployment \
+curl -sS -X POST http://localhost:8000/lab/runs \
   -H 'Content-Type: application/json' \
-  -d '{"auto_start_investigation": true}'
+  -d '{"scenario":"release-regression","auto_start_investigation":true,"ttl_seconds":900}'
 ```
 
-The response includes an `investigation_id` and `stream_url`. Copy the ID, then inspect state or follow SSE events:
+Start an investigation without injecting a fault:
+
+```bash
+curl -sS -X POST http://localhost:8000/investigations \
+  -H 'Content-Type: application/json' \
+  -d '{"services":["api-server"],"symptom":"Product requests are returning errors."}'
+```
+
+Inspect or stream it:
 
 ```bash
 export INVESTIGATION_ID="paste-investigation-id"
@@ -291,74 +164,69 @@ curl -sS "http://localhost:8000/investigation/$INVESTIGATION_ID"
 curl -N "http://localhost:8000/stream/investigation/$INVESTIGATION_ID"
 ```
 
-When the status becomes `awaiting_approval`, copy the pending `approval_id` and decide:
+Approve only after reviewing the frozen parameters and cited observations:
 
 ```bash
 export APPROVAL_ID="paste-approval-id"
 curl -sS -X POST \
   "http://localhost:8000/investigation/$INVESTIGATION_ID/approval/$APPROVAL_ID" \
   -H 'Content-Type: application/json' \
-  -d '{"decision": "approve"}'
+  -d '{"decision":"approve"}'
 ```
 
-Use `{"decision":"reject"}` to close the investigation without executing the action.
+Operator audit and cleanup are separate:
+
+```bash
+export LAB_RUN_ID="paste-lab-run-id"
+curl -sS "http://localhost:8000/lab/runs/$LAB_RUN_ID"
+curl -sS -X POST "http://localhost:8000/lab/runs/$LAB_RUN_ID/cleanup"
+```
+
+## Records and outcomes
+
+New investigations use `evidence_version=3`. Version 2 records remain readable as historical lab-control data, but their approvals cannot execute controller operations.
+
+These concepts are deliberately separate:
+
+- **Model assessment**: `incident_detected`, `no_incident_observed`, or `insufficient_evidence`.
+- **Operation result**: whether the exact approved mutation succeeded, failed, or was stale.
+- **Recovery verification**: whether application probes, infrastructure postconditions, and fresh telemetry prove recovery.
+- **Recovery origin**: agent action, operator cleanup, automatic cleanup, external action, or unverified.
+
+A successful controller acknowledgement never becomes a recovery claim by itself, and model-written report prose cannot override failed verification.
 
 ## Project structure
 
 ```text
-.
-├── backend/
-│   ├── app/
-│   │   ├── workflow.py      # LangGraph nodes, edges, interrupt, and resume
-│   │   ├── tools.py         # Prometheus, Loki, correlation, and report tools
-│   │   ├── main.py          # FastAPI routes, SSE, stores, and checkpointer wiring
-│   │   ├── models.py        # IncidentState and API models
-│   │   ├── store.py         # MongoDB and in-memory persistence adapters
-│   │   └── llm.py           # Deterministic/OpenAI/Gemini/Groq provider switch
-│   └── tests/
-├── frontend/                # Next.js operations dashboard
-├── sample-apps/             # Instrumented API and payment services
-├── prometheus/              # Scrape configuration
-├── loki/                    # Local Loki configuration
-├── postgres/                # Sample database initialization
-├── docker-compose.yml       # Complete nine-service environment
-└── Makefile                 # Install, test, smoke, and lifecycle commands
+backend/app/          API, LangGraph workflow, tools, controller client, verification
+backend/tests/        contract, workflow, controller, sample-app, and verification tests
+lab-controller/app/   private authenticated Docker/PostgreSQL operations and journals
+frontend/             Next.js operator workspace
+sample-apps/          instrumented services plus distinct v1/v2 product handlers
+postgres/             fixture schema and idempotent restricted-role bootstrap
+scripts/              prepared release-image build and acceptance helpers
+docker-compose.yml    local lab topology
 ```
-
-The graph itself lives in [`backend/app/workflow.py`](backend/app/workflow.py), and its shared state schema lives in [`backend/app/models.py`](backend/app/models.py).
 
 ## Testing
 
-Install host-side test dependencies once:
-
 ```bash
 make install
+make test              # backend plus frontend tests
+make test-controller   # controller boundary tests
+make smoke             # Compose validation plus focused workflow contract
+make prepare-releases  # build both fixed release images
+RUN_REAL_LAB=1 REAL_LAB_API_URL=http://localhost:8000 make test-real-groq
 ```
 
-Then run:
+Unit tests use explicit model doubles only inside test modules. Runtime modules never import those doubles. Real-Groq acceptance is opt-in and must target a running disposable lab; it does not silently replace provider calls with fixtures.
 
-```bash
-make test           # backend pytest suite + frontend typecheck and Vitest
-make smoke          # validate Compose + exercise the approval workflow
-```
+## Honest limits
 
-You can also run each suite independently with `make test-backend` or `make test-frontend`.
+- This iteration provides one shared active-run lease, not multi-tenant isolation.
+- The backend event hub is in memory; durable records and checkpoints survive restart, but already emitted SSE events are process-local.
+- The controller is designed for the bundled Compose project, not arbitrary production infrastructure.
+- A likely root cause remains model analysis supported by evidence, not mathematical proof or a certified incident conclusion.
+- Local Docker image IDs are used because repository digests may not exist for local builds.
 
-## Design notes
-
-- **State is evidence, not prompt text.** Nodes store raw findings and build any model input at the point of use.
-- **Collectors converge before analysis.** LangGraph's multi-start fan-out and join ensure the correlation agent sees all three evidence streams.
-- **The interrupt node is side-effect free.** Approval writes happen after resume, preventing replay from duplicating a decision.
-- **Safety is explicit in the graph.** A rejected decision has a terminal report path that never touches the remediation node.
-- **The UI follows the same narrative.** Investigation, evidence, approval, and report remain separate stages connected by one durable record.
-
-## Further reading
-
-- [LangGraph overview](https://docs.langchain.com/oss/python/langgraph/overview)
-- [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
-- [LangGraph interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts)
-- [FastAPI documentation](https://fastapi.tiangolo.com/)
-
----
-
-Built as a safe, observable environment for learning and demonstrating stateful agent orchestration in incident response.
+SREs is built to demonstrate inspectable agent orchestration: real observations, explicit uncertainty, frozen human-approved operations, and measured recovery.

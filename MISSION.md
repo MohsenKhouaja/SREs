@@ -4,7 +4,7 @@
 Build enough working knowledge of this repository to explain it confidently in a technical interview, defend its architectural choices, and trace unfamiliar behavior back to the exact code instead of relying on memorized AI terminology.
 
 ## Success looks like
-- Trace an incident from the operator's click through simulation, evidence collection, approval, remediation, persistence, streaming, and reporting.
+- Trace an incident from the operator's lab-run request through real fault injection, evidence collection, approval, remediation, persistence, streaming, and reporting.
 - Explain what each component owns, why it exists, and how data crosses its boundary.
 - Read the repository independently and support answers with the relevant files, functions, state fields, and tests.
 - Answer design, failure-mode, safety, trade-off, and “what would you change?” interview questions about SREs.

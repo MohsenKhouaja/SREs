@@ -1,6 +1,6 @@
 # Incident Response
 
-This context describes the language used by the system that investigates simulated production failures and requests human authorization for remediation.
+This context describes the language used by the system that investigates real, bounded failures in its local incident lab and requests human authorization for remediation.
 
 ## Language
 
@@ -9,7 +9,7 @@ An observable production disruption that requires investigation.
 _Avoid_: Alert, problem, ticket
 
 **Scenario**:
-A controlled failure mode used to create an Incident: Redis Failure, Slow Database, or Bad Deployment.
+A controlled infrastructure failure used to create an Incident: Redis Unavailable, Database Blocking, or Release Regression.
 _Avoid_: Test case, incident type
 
 **Investigation**:
