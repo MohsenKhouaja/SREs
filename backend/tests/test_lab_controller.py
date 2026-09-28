@@ -67,6 +67,40 @@ def test_release_swap_validates_network_before_stopping_current_container():
     assert container.status == "running"
 
 
+def test_containerd_observation_uses_immutable_platform_manifest():
+    container = FakeContainer(running=True)
+    container.attrs['ImageManifestDescriptor'] = {'digest': 'sha256:platform-manifest'}
+    observation = DockerOperations._observation(container)
+    assert observation['image_id'] == 'sha256:platform-manifest'
+    assert observation['image_config_id'] == 'sha256:redis'
+
+
+def test_prepared_index_resolves_matching_platform_manifest():
+    operations = docker_ops(FakeContainer())
+    image = SimpleNamespace(id='sha256:index', attrs={
+        'Os': 'linux', 'Architecture': 'amd64',
+        'Descriptor': {'mediaType': 'application/vnd.oci.image.index.v1+json', 'digest': 'sha256:index'},
+    })
+    operations.client.images = SimpleNamespace(get=lambda reference: image)
+    calls = []
+    operations.client.api = SimpleNamespace(
+        _url=lambda template, reference: template.format(reference),
+        _get=lambda url, params: calls.append((url, params)) or 'response',
+        _result=lambda response, json: {'Descriptor': {'digest': 'sha256:platform-manifest'}},
+    )
+    assert operations._image_id('prepared:v1') == 'sha256:platform-manifest'
+    assert calls[0][1]['platform'] == '{"os": "linux", "architecture": "amd64"}'
+    operations.client.api._result = lambda response, json: {'Descriptor': {'digest': 'sha256:index'}}
+    with pytest.raises(RuntimeError, match='platform identity'):
+        operations._image_id('prepared:v1')
+
+
+def test_classic_prepared_image_keeps_config_digest():
+    operations = docker_ops(FakeContainer())
+    operations.client.images = SimpleNamespace(get=lambda reference: SimpleNamespace(id='sha256:classic', attrs={}))
+    assert operations._image_id('prepared:v1') == 'sha256:classic'
+
+
 @pytest.mark.parametrize("database", ["incident_db", "sres_production"])
 async def test_database_termination_revalidates_pid_start_and_scope(monkeypatch, database):
     start = datetime(2026, 9, 22, tzinfo=timezone.utc)

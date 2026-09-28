@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -40,7 +41,8 @@ class DockerOperations:
         container.reload()
         attrs = container.attrs
         state = attrs.get("State", {})
-        image = attrs.get("Image", "")
+        image_config = attrs.get("Image", "")
+        image = (attrs.get("ImageManifestDescriptor") or {}).get("digest") or image_config
         configured_image = attrs.get("Config", {}).get("Image")
         return {
             "observation_id": f"container:{container.id}:{state.get('StartedAt') or state.get('FinishedAt')}",
@@ -51,6 +53,7 @@ class DockerOperations:
             "running": bool(state.get("Running")),
             "health": state.get("Health", {}).get("Status"),
             "image_id": image,
+            "image_config_id": image_config,
             # Container.image performs a second image lookup, which fails for a
             # still-running container after its tag has been rebuilt. The
             # configured reference is part of the immutable container record.
@@ -95,7 +98,23 @@ class DockerOperations:
 
     def _image_id(self, reference: str) -> str:
         try:
-            return self.client.images.get(reference).id
+            image = self.client.images.get(reference)
+            descriptor = image.attrs.get("Descriptor") or {}
+            if descriptor.get("mediaType") in {
+                "application/vnd.oci.image.index.v1+json",
+                "application/vnd.docker.distribution.manifest.list.v2+json",
+            }:
+                # Resolve the same platform manifest recorded on Docker 29 containers.
+                response = self.client.api._get(
+                    self.client.api._url("/images/{0}/json", reference),
+                    params={"platform": json.dumps({"os": image.attrs["Os"], "architecture": image.attrs["Architecture"]})},
+                )
+                resolved = self.client.api._result(response, json=True)
+                digest = (resolved.get("Descriptor") or {}).get("digest")
+                if not digest or digest == descriptor.get("digest"):
+                    raise RuntimeError("Prepared image platform identity could not be resolved")
+                return digest
+            return image.id
         except ImageNotFound as exc:
             raise RuntimeError(f"Required prepared image is unavailable: {reference}") from exc
 
