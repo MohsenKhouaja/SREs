@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, AsyncIterator
 
 import httpx
@@ -20,7 +20,7 @@ from .events import EventHub
 from .llm import LLMUnavailable
 from .lab_client import LabClient, LabControllerUnavailable
 from .models import ApprovalDecision, InvestigationRequest, LabRunRequest, QuestionRequest, utc_now
-from .store import InMemoryStore, MongoStore, Store
+from .store import InMemoryStore, MongoStore, Store, approval_expired
 from .workflow import InvestigationWorkflow, SCENARIOS
 
 
@@ -51,10 +51,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         app.state.workflow = InvestigationWorkflow(selected_store, events, configured, checkpointer)
         app.state.lab = LabClient(configured)
         app.state.settings = configured
+        await app.state.workflow.reconcile(startup=True)
+        watchdog = asyncio.create_task(app.state.workflow.watch_expiry())
         yield
+        watchdog.cancel()
+        await asyncio.gather(watchdog, return_exceptions=True)
         for task in app.state.workflow.tasks.values():
             if not task.done():
                 task.cancel()
+        await asyncio.gather(*app.state.workflow.tasks.values(), return_exceptions=True)
         await selected_store.close()
         if checkpoint_client is not None:
             checkpoint_client.close()
@@ -215,15 +220,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         investigation = await request.app.state.store.get_investigation(investigation_id)
         if not _is_executable_evidence(investigation) or investigation["status"] != "awaiting_approval":
             raise HTTPException(status_code=409, detail="Investigation is not awaiting approval")
-        expires_at = document.get("expires_at")
-        if expires_at and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
-            await request.app.state.store.invalidate_pending_approvals(investigation_id, "approval_expired")
+        if approval_expired(document):
+            await request.app.state.workflow.reconcile()
             raise HTTPException(status_code=409, detail="Approval expired; collect fresh evidence before executing an operation")
         approved = body.decision == "approve"
         decision = "approved" if approved else "rejected"
-        if not await request.app.state.store.decide_approval(approval_id, decision):
+        if not await request.app.state.workflow.resolve_approval(investigation_id, approval_id, decision):
+            await request.app.state.workflow.reconcile()
             raise HTTPException(status_code=409, detail="Approval already decided or invalidated")
-        request.app.state.workflow.tasks[investigation_id] = asyncio.create_task(request.app.state.workflow.resume(investigation_id, approved))
         return {"approval_id": approval_id, "status": decision, "investigation_id": investigation_id}
 
     @app.get("/stream/investigation/{investigation_id}")

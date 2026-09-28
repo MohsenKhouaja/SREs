@@ -11,6 +11,7 @@ import {Panel} from "@/components/ui/panel";
 import {Skeleton} from "@/components/ui/skeleton";
 import {apiFetch, formatScenario, shortId, useInvestigation, useLabRun} from "@/lib/api";
 import {useInvestigationStream} from "@/lib/use-stream";
+import {isApprovalOpen, isTerminal, reportedStatuses} from "@/lib/investigation-state";
 
 const agentOrder = ["log", "metrics", "event", "correlation", "report"];
 
@@ -18,16 +19,22 @@ export default function InvestigationPage() {
   const {id} = useParams<{id: string}>();
   const {data, error, isLoading, mutate} = useInvestigation(id);
   const {data: labRun} = useLabRun(data?.lab_run_id);
-  const {events, connected} = useInvestigationStream(id);
+  const terminal = isTerminal(data?.status);
+  const {events, connected} = useInvestigationStream(id, !terminal);
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [questionError, setQuestionError] = useState("");
   const liveSteps = events.filter((event) => event.type === "agent_step" && event.step);
   const storedSteps = Object.values(data?.agents || {}).flatMap((agent) => agent.steps?.map((step) => ({agent: agent.agent_name, ...step})) || []);
   const steps = liveSteps.length ? liveSteps : storedSteps;
-  const pending = data?.approvals?.find((approval) => approval.status === "pending");
-  const finished = ["completed", "completed_with_rejection", "no_incident_observed", "inconclusive", "remediation_failed"].includes(data?.status || "");
-  const terminal = finished || ["failed", "cancelled"].includes(data?.status || "");
+  const pending = data?.approvals?.find((approval) => isApprovalOpen(approval));
+  const expiredPending = data?.approvals?.some((approval) => approval.status === "pending" && !isApprovalOpen(approval));
+  const finished = reportedStatuses.includes(data?.status || "");
+
+  function agentStatus(agent: string) {
+    const status = data?.agents?.[agent]?.status || "waiting";
+    return agent === "report" && status === "waiting" && data?.status === "awaiting_approval" ? "awaiting_approval" : status;
+  }
 
   async function cancel() { await apiFetch(`/investigation/${id}/cancel`, {method: "POST"}); await mutate(); }
 
@@ -56,17 +63,20 @@ export default function InvestigationPage() {
     {data.status === "inconclusive" && <p className="notice">The collected evidence did not support a diagnosis. No remediation was executed.</p>}
     {data.status === "no_incident_observed" && <p className="notice">Populated recent observations did not show a supported incident. No remediation was proposed.</p>}
     {data.status === "remediation_failed" && <p className="error-message" role="alert">Recovery was not verified. Inspect the report for the failed checks.</p>}
+    {data.status === "completed_with_expired_approval" && <p className="notice">The approval window expired. No agent remediation was executed.</p>}
+    {data.status === "completed_with_invalidated_approval" && <p className="notice">The proposed operation was invalidated. No agent remediation was executed.</p>}
+    {expiredPending && <p className="notice" role="status">Approval expired. Closing the investigation without executing the proposed operation.</p>}
     {pending && <div className="notice"><div><strong><AlertTriangle size={16} aria-hidden="true" /> Approval required</strong><span>{pending.action_type.replaceAll("_", " ")} on {pending.target}</span></div><Link href={`/approvals/${pending.approval_id}`} className="button button-primary">Review evidence</Link></div>}
-    <div className="agent-rail" aria-label="Agent statuses">{agentOrder.map((agent) => <div className="agent-chip" key={agent}><span>{agent} agent</span><Badge status={data.agents?.[agent]?.status || "waiting"} /></div>)}</div>
+    <div className="agent-rail" aria-label="Agent statuses">{agentOrder.map((agent) => <div className="agent-chip" key={agent}><span>{agent} agent</span><Badge status={agentStatus(agent)}>{agent === "report" && agentStatus(agent) === "awaiting_approval" ? "Waiting for approval" : undefined}</Badge></div>)}</div>
     {labRun && <Panel className="audit-agent"><div className="panel-heading"><h2>Lab run audit</h2><Badge status={labRun.status} /></div><div className="approval-hero"><div className="approval-field"><span>Run</span><strong className="mono">{shortId(labRun.run_id)}</strong></div><div className="approval-field"><span>Expires</span><strong>{new Date(labRun.expires_at).toLocaleString()}</strong></div><div className="approval-field"><span>Recovery origin</span><strong>{data.recovery_origin || "None recorded"}</strong></div></div><details className="audit-run"><summary>Injection and cleanup record</summary><pre className="raw-evidence">{JSON.stringify({fault: labRun.fault, cleanup: labRun.cleanup}, null, 2)}</pre></details></Panel>}
     <div className="investigation-grid">
-      <Panel className="stream-panel"><div className="panel-heading"><h2>Agent activity</h2><span className={`connection ${connected ? "is-live" : ""}`}><Radio size={13} aria-hidden="true" />{connected ? "Live" : "Reconnecting"}</span></div><div className="step-list" aria-live="polite">{steps.length ? steps.map((event, index) => <div className="step" key={`${event.agent}-${index}`}><span className="step-agent">{event.agent}</span><span className="step-copy">{event.step}</span></div>) : <div className="step-placeholder">Waiting for the first agent event. The simulator warms up telemetry before analysis begins.</div>}</div></Panel>
+      <Panel className="stream-panel"><div className="panel-heading"><h2>Agent activity</h2><span className={`connection ${connected ? "is-live" : ""}`}><Radio size={13} aria-hidden="true" />{terminal ? "Closed" : data.status === "awaiting_approval" ? "Paused" : connected ? "Connected" : "Reconnecting"}</span></div><div className="step-list" aria-live="polite">{steps.length ? steps.map((event, index) => <div className="step" key={`${event.agent}-${index}`}><span className="step-agent">{event.agent}</span><span className="step-copy">{event.step}</span></div>) : <div className="step-placeholder">{terminal ? "No agent activity was recorded." : "Waiting for the first agent event."}</div>}</div></Panel>
       <Panel className="findings-panel"><div className="panel-heading"><h2>Current findings</h2><span className="subtle">{Object.values(data.agents || {}).reduce((count, agent) => count + (agent.findings?.length || 0), 0)} captured</span></div>{agentOrder.map((agent) => <section className="finding-group" key={agent}><h3>{agent} agent</h3>{data.agents?.[agent]?.findings?.length ? data.agents[agent].findings.map((finding, index) => <p className="finding-item" id={finding.finding_id ? `finding-${finding.finding_id}` : undefined} key={finding.finding_id || index}>{finding.message}</p>) : <p className="finding-item">No finding yet.</p>}</section>)}</Panel>
     </div>
     <div className="section-title"><h2>Groq audit trail</h2><p>Model inputs, bounded tool calls, and validated outputs</p></div>
     <div className="audit-list">{agentOrder.map((agent) => {
       const runs = data.agents?.[agent]?.llm_runs || [];
-      return <Panel className="audit-agent" key={agent}><div className="audit-agent-heading"><div><Bot size={16} aria-hidden="true" /><strong>{agent} agent</strong></div><Badge status={data.agents?.[agent]?.execution_mode || "waiting"} /></div>{runs.length ? runs.map((run) => <details className="audit-run" key={run.run_id}><summary><span>{run.provider} · {run.model}</span><span>{Math.round(run.latency_ms)} ms · {run.usage?.total_tokens || 0} tokens</span></summary><div className="audit-body"><h3>System prompt</h3><pre>{run.input.system_prompt}</pre><h3>User input</h3><pre>{run.input.user_prompt}</pre>{run.tool_calls.length > 0 && <><h3>Tool calls</h3><pre>{JSON.stringify(run.tool_calls, null, 2)}</pre></>}<h3>Validated output</h3><pre>{JSON.stringify(run.output, null, 2)}</pre>{run.error && <p className="audit-error">{run.error}</p>}</div></details>) : <p className="audit-empty">No model run yet.</p>}</Panel>;
+      return <Panel className="audit-agent" key={agent}><div className="audit-agent-heading"><div><Bot size={16} aria-hidden="true" /><strong>{agent} agent</strong></div><Badge status={data.agents?.[agent]?.execution_mode || agentStatus(agent)} /></div>{runs.length ? runs.map((run) => <details className="audit-run" key={run.run_id}><summary><span>{run.provider} · {run.model}</span><span>{Math.round(run.latency_ms)} ms · {run.usage?.total_tokens || 0} tokens</span></summary><div className="audit-body"><h3>System prompt</h3><pre>{run.input.system_prompt}</pre><h3>User input</h3><pre>{run.input.user_prompt}</pre>{run.tool_calls.length > 0 && <><h3>Tool calls</h3><pre>{JSON.stringify(run.tool_calls, null, 2)}</pre></>}<h3>Validated output</h3><pre>{JSON.stringify(run.output, null, 2)}</pre>{run.error && <p className="audit-error">{run.error}</p>}</div></details>) : <p className="audit-empty">{terminal ? "No model run was executed." : "No model run yet."}</p>}</Panel>;
     })}</div>
     <div className="section-title"><h2>Ask about this investigation</h2><p>Answers use only the evidence above</p></div>
     <Panel className="question-panel">

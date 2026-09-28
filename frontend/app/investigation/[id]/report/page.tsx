@@ -1,12 +1,14 @@
 "use client";
 
 import {useState} from "react";
+import Link from "next/link";
 import {useParams} from "next/navigation";
 import {PageHeader} from "@/components/page-header";
 import {Badge} from "@/components/ui/badge";
 import {Panel} from "@/components/ui/panel";
 import {Skeleton} from "@/components/ui/skeleton";
 import {formatScenario, formatTime, shortId, useInvestigation} from "@/lib/api";
+import {isTerminal} from "@/lib/investigation-state";
 
 export default function ReportPage() {
   const {id} = useParams<{id: string}>();
@@ -15,7 +17,7 @@ export default function ReportPage() {
   if (isLoading) return <Panel><Skeleton rows={7} /></Panel>;
   if (error || !data) return <p className="error-message" role="alert">Could not load report.</p>;
   const report = data.report_json;
-  if (!report.summary) return <p className="error-message">The report is not ready. Return to the investigation while the agents finish.</p>;
+  if (!report.summary) return <><p role="status">{data.status === "awaiting_approval" ? "Report generation is paused until the approval decision or expiry." : isTerminal(data.status) ? `No report was produced. ${data.error || "The investigation stopped before reporting."}` : "Report generation is in progress."}</p><Link className="button" href={`/investigation/${id}`}>Return to investigation</Link></>;
   return <>
     <PageHeader title={`Report · ${shortId(id)}`} description={`${formatScenario(data.scenario)} investigation completed ${formatTime(data.completed_at)}.`} actions={<Badge status={data.status} />} />
     {data.evidence_version === 2 && <p className="notice">Historical report produced by the previous application-control workflow.</p>}

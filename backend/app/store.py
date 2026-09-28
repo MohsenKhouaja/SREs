@@ -17,6 +17,7 @@ class Store(Protocol):
     async def close(self) -> None: ...
     async def create_investigation(self, document: dict[str, Any]) -> None: ...
     async def update_investigation(self, investigation_id: str, updates: dict[str, Any]) -> None: ...
+    async def transition_investigation(self, investigation_id: str, expected_status: str, updates: dict[str, Any]) -> bool: ...
     async def get_investigation(self, investigation_id: str) -> dict[str, Any] | None: ...
     async def list_investigations(self) -> list[dict[str, Any]]: ...
     async def upsert_agent_state(self, investigation_id: str, agent_name: str, updates: dict[str, Any]) -> None: ...
@@ -41,6 +42,16 @@ def _serialize(document: dict[str, Any] | None) -> dict[str, Any] | None:
             normalized = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
             result[key] = normalized.isoformat().replace("+00:00", "Z")
     return result
+
+
+def approval_expired(document: dict[str, Any], now: datetime | None = None) -> bool:
+    value = document.get("expires_at")
+    if not value:
+        return False
+    deadline = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return deadline <= (now or utc_now())
 
 
 class InMemoryStore:
@@ -73,6 +84,15 @@ class InMemoryStore:
         async with self._lock:
             return _serialize(self.investigations.get(investigation_id))
 
+    async def transition_investigation(self, investigation_id: str, expected_status: str, updates: dict[str, Any]) -> bool:
+        async with self._lock:
+            document = self.investigations.get(investigation_id)
+            if not document or document.get("status") != expected_status:
+                return False
+            document.update(deepcopy(updates))
+            document["updated_at"] = utc_now()
+            return True
+
     async def list_investigations(self) -> list[dict[str, Any]]:
         async with self._lock:
             docs = sorted(self.investigations.values(), key=lambda item: item["created_at"], reverse=True)
@@ -101,6 +121,10 @@ class InMemoryStore:
         async with self._lock:
             document = self.approvals.get(approval_id)
             if not document or document.get("status") != "pending":
+                return False
+            if decision in {"approved", "rejected"} and approval_expired(document):
+                return False
+            if decision == "expired" and not approval_expired(document):
                 return False
             document.update({"status": decision, "decided_at": utc_now()})
             return True
@@ -172,6 +196,13 @@ class MongoStore:
     async def get_investigation(self, investigation_id: str) -> dict[str, Any] | None:
         return _serialize(await self.db.investigations.find_one({"incident_id": investigation_id}))
 
+    async def transition_investigation(self, investigation_id: str, expected_status: str, updates: dict[str, Any]) -> bool:
+        result = await self.db.investigations.update_one(
+            {"incident_id": investigation_id, "status": expected_status},
+            {"$set": {**updates, "updated_at": utc_now()}},
+        )
+        return result.modified_count == 1
+
     async def list_investigations(self) -> list[dict[str, Any]]:
         cursor = self.db.investigations.find().sort("created_at", DESCENDING)
         return [_serialize(doc) async for doc in cursor]
@@ -195,9 +226,21 @@ class MongoStore:
         await self.db.approvals.update_one({"approval_id": approval_id}, {"$set": updates})
 
     async def decide_approval(self, approval_id: str, decision: str) -> bool:
+        now = utc_now()
+        query: dict[str, Any] = {"approval_id": approval_id, "status": "pending"}
+        # Older approvals store ISO strings; accept both representations without
+        # weakening the deadline check inside the atomic pending-state claim.
+        if decision in {"approved", "rejected", "expired"}:
+            comparison = "$lte" if decision == "expired" else "$gt"
+            query["$or"] = [
+                {"expires_at": {comparison: now, "$type": "date"}},
+                {"expires_at": {comparison: now.isoformat().replace("+00:00", "Z"), "$type": "string"}},
+            ]
+            if decision != "expired":
+                query["$or"].extend([{"expires_at": {"$exists": False}}, {"expires_at": None}])
         result = await self.db.approvals.update_one(
-            {"approval_id": approval_id, "status": "pending"},
-            {"$set": {"status": decision, "decided_at": utc_now()}},
+            query,
+            {"$set": {"status": decision, "decided_at": now}},
         )
         return result.modified_count == 1
 
