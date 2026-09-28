@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
 import httpx
@@ -16,9 +17,19 @@ from pymongo import MongoClient
 
 from .config import Settings, get_settings
 from .events import EventHub
-from .models import ApprovalDecision, Scenario, SettingsUpdate, SimulationRequest
+from .llm import LLMUnavailable
+from .lab_client import LabClient, LabControllerUnavailable
+from .models import ApprovalDecision, InvestigationRequest, LabRunRequest, QuestionRequest, utc_now
 from .store import InMemoryStore, MongoStore, Store
-from .workflow import InvestigationWorkflow, SCENARIO_PROFILES
+from .workflow import InvestigationWorkflow, SCENARIOS
+
+
+def _is_readable_evidence(document: dict[str, Any] | None) -> bool:
+    return bool(document and document.get("evidence_version") in {2, 3})
+
+
+def _is_executable_evidence(document: dict[str, Any] | None) -> bool:
+    return bool(document and document.get("evidence_version") == 3)
 
 
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
@@ -38,6 +49,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         app.state.store = selected_store
         app.state.events = events
         app.state.workflow = InvestigationWorkflow(selected_store, events, configured, checkpointer)
+        app.state.lab = LabClient(configured)
         app.state.settings = configured
         yield
         for task in app.state.workflow.tasks.values():
@@ -50,7 +62,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     app = FastAPI(title="SREs Incident Response API", version="1.0.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://frontend:3000"],
+        allow_origins=["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3001", "http://frontend:3000"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -60,23 +72,35 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     async def health() -> dict[str, str]:
         return {"status": "healthy"}
 
-    @app.post("/simulate/{scenario}", status_code=202)
-    async def simulate(scenario: Scenario, body: SimulationRequest, request: Request) -> dict[str, Any]:
-        if scenario not in SCENARIO_PROFILES:
-            raise HTTPException(status_code=404, detail="Scenario not found")
-        investigations = await request.app.state.store.list_investigations()
-        if any(item["scenario"] == scenario and item["status"] in {"investigating", "awaiting_approval"} for item in investigations):
-            raise HTTPException(status_code=409, detail="Investigation already running for this scenario")
-        try:
-            await _trigger_failure(request.app.state.settings, scenario)
-        except httpx.HTTPError as exc:
-            if request.app.state.settings.environment != "test":
-                raise HTTPException(status_code=503, detail="Sample app not reachable") from exc
+    async def create_investigation_record(
+        request: Request,
+        body: InvestigationRequest,
+        *,
+        lab_run_id: str | None = None,
+        scenario: str = "manual",
+    ) -> dict[str, Any]:
+        if not request.app.state.workflow.llm.enabled:
+            raise HTTPException(status_code=503, detail="Groq is not configured. Set GROQ_API_KEY before starting an investigation.")
+        now = utc_now()
+        time_to = body.time_to or now
+        time_from = body.time_from or (time_to - timedelta(minutes=5))
+        if time_to > now + timedelta(seconds=5) or time_from >= time_to or time_to - time_from > timedelta(minutes=5):
+            raise HTTPException(status_code=422, detail="Observation interval must be a valid UTC window of at most five minutes and cannot be in the future.")
         investigation_id = str(uuid.uuid4())
         workflow: InvestigationWorkflow = request.app.state.workflow
-        await workflow.create(investigation_id, scenario)
+        await workflow.create(
+            investigation_id,
+            {
+                "services": list(dict.fromkeys(body.services)),
+                "symptom": body.symptom,
+                "time_from": time_from,
+                "time_to": time_to,
+                "scenario": scenario,
+            },
+            lab_run_id,
+        )
         if body.auto_start_investigation:
-            workflow.start(investigation_id, scenario)
+            workflow.start(investigation_id)
         return {
             "investigation_id": investigation_id,
             "scenario": scenario,
@@ -85,9 +109,41 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "stream_url": f"/stream/investigation/{investigation_id}",
         }
 
+    @app.post("/investigations", status_code=202)
+    async def start_investigation(body: InvestigationRequest, request: Request) -> dict[str, Any]:
+        return await create_investigation_record(request, body)
+
+    @app.post("/lab/runs", status_code=202)
+    async def launch_lab_run(body: LabRunRequest, request: Request) -> dict[str, Any]:
+        if body.scenario not in SCENARIOS:
+            raise HTTPException(status_code=404, detail="Scenario not found")
+        if not request.app.state.workflow.llm.enabled:
+            raise HTTPException(status_code=503, detail="Groq is not configured. No fault was introduced.")
+        try:
+            run = await request.app.state.lab.create_run(body.scenario, body.ttl_seconds)
+        except LabControllerUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        scenario_context = {
+            "redis-unavailable": (["api-server", "payment-service"], "Dependent application requests are returning errors."),
+            "database-blocking": (["api-server"], "User retrieval requests are timing out or responding slowly."),
+            "release-regression": (["api-server"], "The product operation is returning server errors."),
+        }
+        services, symptom = scenario_context[body.scenario]
+        try:
+            created = await create_investigation_record(
+                request,
+                InvestigationRequest(services=services, symptom=symptom, auto_start_investigation=body.auto_start_investigation),
+                lab_run_id=run["run_id"],
+                scenario=body.scenario,
+            )
+        except Exception:
+            await request.app.state.lab.cleanup(run["run_id"])
+            raise
+        return {**created, "lab_run_id": run["run_id"], "expires_at": run["expires_at"]}
+
     @app.post("/investigation/{investigation_id}/cancel")
     async def cancel(investigation_id: str, request: Request) -> dict[str, str]:
-        if not await request.app.state.store.get_investigation(investigation_id):
+        if not _is_readable_evidence(await request.app.state.store.get_investigation(investigation_id)):
             raise HTTPException(status_code=404, detail="Investigation not found")
         await request.app.state.workflow.cancel(investigation_id)
         return {"investigation_id": investigation_id, "status": "cancelled"}
@@ -95,20 +151,51 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/investigation/{investigation_id}")
     async def investigation(investigation_id: str, request: Request) -> dict[str, Any]:
         document = await request.app.state.store.get_investigation(investigation_id)
-        if not document:
+        if not _is_readable_evidence(document):
             raise HTTPException(status_code=404, detail="Investigation not found")
         agents = await request.app.state.store.list_agent_states(investigation_id)
         approvals = await request.app.state.store.list_approvals(investigation_id)
-        return {**document, "investigation_id": document["incident_id"], "agents": {agent["agent_name"]: agent for agent in agents}, "approvals": approvals}
+        questions = await request.app.state.store.list_questions(investigation_id)
+        return {**document, "investigation_id": document["incident_id"], "agents": {agent["agent_name"]: agent for agent in agents}, "approvals": approvals, "questions": questions}
+
+    @app.post("/investigation/{investigation_id}/questions", status_code=201)
+    async def ask_question(investigation_id: str, body: QuestionRequest, request: Request) -> dict[str, Any]:
+        if not _is_readable_evidence(await request.app.state.store.get_investigation(investigation_id)):
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        question = body.question.strip()
+        if not question:
+            raise HTTPException(status_code=422, detail="Question must not be blank")
+        try:
+            return await request.app.state.workflow.answer_question(investigation_id, question)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Investigation not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except LLMUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/investigations")
     async def investigations(request: Request) -> dict[str, Any]:
         documents = await request.app.state.store.list_investigations()
-        return {"investigations": [{**doc, "investigation_id": doc["incident_id"]} for doc in documents]}
+        return {
+            "investigations": [
+                {
+                    "investigation_id": document["incident_id"],
+                    "scenario": document["scenario"],
+                    "status": document["status"],
+                    "created_at": document["created_at"],
+                    "updated_at": document["updated_at"],
+                    "completed_at": document.get("completed_at"),
+                    "evidence_version": document["evidence_version"],
+                }
+                for document in documents
+                if _is_readable_evidence(document)
+            ]
+        }
 
     @app.get("/approvals")
     async def approvals(request: Request, status: str | None = None) -> dict[str, Any]:
-        documents = await request.app.state.store.list_approvals()
+        documents = [document for document in await request.app.state.store.list_approvals() if _is_readable_evidence(document)]
         if status:
             documents = [document for document in documents if document["status"] == status]
         return {"approvals": documents}
@@ -116,36 +203,57 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/approvals/{approval_id}")
     async def approval(approval_id: str, request: Request) -> dict[str, Any]:
         document = await request.app.state.store.get_approval(approval_id)
-        if not document:
+        if not _is_readable_evidence(document):
             raise HTTPException(status_code=404, detail="Approval not found")
         return document
 
     @app.post("/investigation/{investigation_id}/approval/{approval_id}")
     async def decide(investigation_id: str, approval_id: str, body: ApprovalDecision, request: Request) -> dict[str, str]:
         document = await request.app.state.store.get_approval(approval_id)
-        if not document or document["investigation_id"] != investigation_id:
+        if not _is_executable_evidence(document) or document["investigation_id"] != investigation_id:
             raise HTTPException(status_code=404, detail="Approval not found")
-        if document["status"] != "pending":
-            raise HTTPException(status_code=409, detail="Approval already decided")
+        investigation = await request.app.state.store.get_investigation(investigation_id)
+        if not _is_executable_evidence(investigation) or investigation["status"] != "awaiting_approval":
+            raise HTTPException(status_code=409, detail="Investigation is not awaiting approval")
+        expires_at = document.get("expires_at")
+        if expires_at and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+            await request.app.state.store.invalidate_pending_approvals(investigation_id, "approval_expired")
+            raise HTTPException(status_code=409, detail="Approval expired; collect fresh evidence before executing an operation")
         approved = body.decision == "approve"
-        asyncio.create_task(request.app.state.workflow.resume(investigation_id, approved))
-        return {"approval_id": approval_id, "status": "approved" if approved else "rejected", "investigation_id": investigation_id}
+        decision = "approved" if approved else "rejected"
+        if not await request.app.state.store.decide_approval(approval_id, decision):
+            raise HTTPException(status_code=409, detail="Approval already decided or invalidated")
+        request.app.state.workflow.tasks[investigation_id] = asyncio.create_task(request.app.state.workflow.resume(investigation_id, approved))
+        return {"approval_id": approval_id, "status": decision, "investigation_id": investigation_id}
 
     @app.get("/stream/investigation/{investigation_id}")
     async def stream(investigation_id: str, request: Request) -> StreamingResponse:
-        if not await request.app.state.store.get_investigation(investigation_id):
+        if not _is_readable_evidence(await request.app.state.store.get_investigation(investigation_id)):
             raise HTTPException(status_code=404, detail="Investigation not found")
 
         async def event_stream() -> AsyncIterator[str]:
             subscription = request.app.state.events.subscribe(investigation_id)
-            while True:
-                try:
-                    event = await asyncio.wait_for(anext(subscription), timeout=15)
-                    yield f"data: {json.dumps(event, default=str)}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-                if await request.is_disconnected():
-                    break
+            next_event = asyncio.create_task(anext(subscription))
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(asyncio.shield(next_event), timeout=15)
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"
+                    except StopAsyncIteration:
+                        break
+                    else:
+                        next_event = asyncio.create_task(anext(subscription))
+                        yield f"data: {json.dumps(event, default=str)}\n\n"
+                    if await request.is_disconnected():
+                        break
+            finally:
+                if not next_event.done():
+                    next_event.cancel()
+                with suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await next_event
+                with suppress(RuntimeError):
+                    await subscription.aclose()
 
         return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -157,81 +265,68 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "sample_payment": f"{settings.sample_payment_url}/health",
             "prometheus": f"{settings.prometheus_url}/-/healthy",
             "loki": f"{settings.loki_url}/ready",
+            "lab_controller": f"{settings.lab_controller_url}/health",
         }
-        result: dict[str, str] = {"mongodb": "healthy"}
+        result: dict[str, str] = {"mongodb": await request.app.state.store.health(), "llm": "configured" if request.app.state.workflow.llm.enabled else "not_configured"}
+        dependency_states: dict[str, list[str]] = {"redis": [], "postgres": []}
         async with httpx.AsyncClient(timeout=2) as client:
             for name, url in checks.items():
                 try:
                     response = await client.get(url)
                     result[name] = "healthy" if response.is_success else "unhealthy"
+                    if name.startswith("sample_"):
+                        for dependency, value in response.json().get("dependencies", {}).items():
+                            if dependency in dependency_states:
+                                dependency_states[dependency].append(value)
                 except httpx.HTTPError:
                     result[name] = "unreachable"
-        result["redis"] = "healthy" if result.get("sample_api") == "healthy" else "unknown"
-        result["postgres"] = "healthy" if result.get("sample_api") == "healthy" else "unknown"
+                except ValueError:
+                    result[name] = "unknown"
+        for dependency, values in dependency_states.items():
+            expected = 2 if dependency == "redis" else 1
+            result[dependency] = "unhealthy" if any(value != "healthy" for value in values) else "healthy" if len(values) == expected else "unknown"
         return result
 
-    @app.get("/settings")
-    async def read_settings(request: Request) -> dict[str, Any]:
-        settings = request.app.state.settings
-        provider_keys = {
-            "openai": settings.openai_api_key,
-            "gemini": settings.gemini_api_key,
-            "groq": settings.groq_api_key,
-        }
-        configured_key = provider_keys.get(settings.llm_provider, "")
-        return {"llm_provider": settings.llm_provider, "api_key_configured": bool(configured_key), "environment": settings.environment}
-
-    @app.post("/settings")
-    async def update_settings(body: SettingsUpdate, request: Request) -> dict[str, Any]:
-        settings = request.app.state.settings
-        settings.llm_provider = body.llm_provider
-        if body.api_key:
-            if body.llm_provider == "openai":
-                settings.openai_api_key = body.api_key
-            elif body.llm_provider == "gemini":
-                settings.gemini_api_key = body.api_key
-            elif body.llm_provider == "groq":
-                settings.groq_api_key = body.api_key
-        request.app.state.workflow.llm = request.app.state.workflow.llm.__class__(settings)
-        provider_keys = {
-            "openai": settings.openai_api_key,
-            "gemini": settings.gemini_api_key,
-            "groq": settings.groq_api_key,
-        }
-        return {"llm_provider": settings.llm_provider, "api_key_configured": bool(provider_keys.get(settings.llm_provider, "")), "environment": settings.environment}
-
     @app.post("/system/recover")
-    async def recover(request: Request) -> dict[str, str]:
-        settings = request.app.state.settings
-        async with httpx.AsyncClient(timeout=8) as client:
-            calls = []
-            for base in (settings.sample_api_url, settings.sample_payment_url):
-                calls.extend(
-                    [
-                        client.post(f"{base}/api/simulate/redis-failure", json={"enabled": False}),
-                        client.post(f"{base}/api/simulate/bad-deployment", json={"version": "v1"}),
-                    ]
-                )
-            calls.append(client.post(f"{settings.sample_api_url}/api/simulate/slow-db", json={"enabled": False}))
-            responses = await asyncio.gather(*calls, return_exceptions=True)
-        if not any(isinstance(response, httpx.Response) and response.is_success for response in responses):
-            raise HTTPException(status_code=503, detail="No sample service recovered")
-        return {"status": "recovered"}
+    async def recover(request: Request) -> dict[str, Any]:
+        investigations = await request.app.state.store.list_investigations()
+        if any(_is_executable_evidence(item) and item["status"] in {"investigating", "awaiting_approval"} for item in investigations):
+            raise HTTPException(status_code=409, detail="Finish or cancel the active investigation before resetting the lab.")
+        run_ids = list(dict.fromkeys(item.get("lab_run_id") for item in investigations if item.get("lab_run_id")))
+        results = []
+        for run_id in run_ids:
+            try:
+                results.append(await request.app.state.lab.cleanup(run_id))
+            except LabControllerUnavailable as exc:
+                if "not found" not in str(exc).lower():
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {"status": "reconciled", "runs": results}
+
+    @app.get("/lab/runs/{run_id}")
+    async def lab_run(run_id: str, request: Request) -> dict[str, Any]:
+        try:
+            return await request.app.state.lab.get_run(run_id)
+        except LabControllerUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/lab/runs/{run_id}/cleanup")
+    async def cleanup_lab_run(run_id: str, request: Request) -> dict[str, Any]:
+        investigations = [item for item in await request.app.state.store.list_investigations() if item.get("lab_run_id") == run_id]
+        for investigation in investigations:
+            if investigation["status"] in {"investigating", "awaiting_approval"}:
+                await request.app.state.workflow.cancel(investigation["incident_id"])
+        try:
+            cleaned = await request.app.state.lab.cleanup(run_id)
+        except LabControllerUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        for investigation in investigations:
+            await request.app.state.store.update_investigation(
+                investigation["incident_id"],
+                {"recovery_origin": cleaned.get("cleanup", {}).get("origin", "operator_cleanup")},
+            )
+        return cleaned
 
     return app
-
-
-async def _trigger_failure(settings: Settings, scenario: str) -> None:
-    if scenario == "redis-failure":
-        path, payload, targets = "/api/simulate/redis-failure", {"enabled": True}, [settings.sample_api_url, settings.sample_payment_url]
-    elif scenario == "slow-db":
-        path, payload, targets = "/api/simulate/slow-db", {"enabled": True}, [settings.sample_api_url]
-    else:
-        path, payload, targets = "/api/simulate/bad-deployment", {"version": "v2"}, [settings.sample_api_url, settings.sample_payment_url]
-    async with httpx.AsyncClient(timeout=8) as client:
-        responses = await asyncio.gather(*(client.post(f"{target}{path}", json=payload) for target in targets))
-        for response in responses:
-            response.raise_for_status()
 
 
 app = create_app()

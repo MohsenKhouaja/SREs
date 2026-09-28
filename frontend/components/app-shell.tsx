@@ -4,22 +4,28 @@ import Link from "next/link";
 import Image from "next/image";
 import {usePathname} from "next/navigation";
 import useSWR from "swr";
-import {Activity, CheckSquare2, History, Radar, Settings} from "lucide-react";
+import {Activity, CheckSquare2, History, Radar} from "lucide-react";
 import {apiFetch} from "@/lib/api";
 import {clsx} from "clsx";
 import type {ReactNode} from "react";
 
 const navigation = [
   {href: "/investigations", label: "Investigations", icon: History},
-  {href: "/simulate", label: "Simulate", icon: Radar},
+  {href: "/lab", label: "Incident lab", icon: Radar},
   {href: "/approvals", label: "Approvals", icon: CheckSquare2},
-  {href: "/settings", label: "Settings", icon: Settings},
 ];
+
+export function classifySystemStatus(data?: Record<string, string>) {
+  if (!data) return "checking";
+  const values = Object.values(data);
+  if (values.length > 0 && values.every((value) => value === "healthy" || value === "configured")) return "operational";
+  if (values.some((value) => value === "unhealthy")) return "degraded";
+  return "partial";
+}
 
 function SystemIndicator() {
   const {data} = useSWR<Record<string, string>>("/system/status", (path: string) => apiFetch(path), {refreshInterval: 10000});
-  const values = Object.values(data || {});
-  const state = !data ? "checking" : values.every((value) => value === "healthy") ? "operational" : values.some((value) => value === "unhealthy") ? "degraded" : "partial";
+  const state = classifySystemStatus(data);
   return <div className={clsx("system-indicator", `system-${state}`)} title={data ? Object.entries(data).map(([key, value]) => `${key}: ${value}`).join("\n") : "Checking dependencies"}><Activity size={15} aria-hidden="true" /><span>{state === "checking" ? "Checking system" : `System ${state}`}</span></div>;
 }
 

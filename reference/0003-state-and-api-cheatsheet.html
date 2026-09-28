@@ -4,7 +4,7 @@
   <header class="masthead"><div><p class="eyebrow">SREs reference 0003</p><h1>State and API cheatsheet</h1><p class="dek">Field ownership, lifecycle statuses, and route contracts on one printable sheet.</p></div><div class="lesson-meta"><strong>Primary sources</strong><a href="../backend/app/models.py">models.py</a><br><a href="../backend/app/main.py">main.py</a></div></header>
   <main>
     <section><h2>IncidentState field ownership</h2><div class="table-wrap"><table class="data-table"><thead><tr><th>Fields</th><th>Writer</th><th>Reader</th><th>Merge</th></tr></thead><tbody>
-      <tr><td><code>incident_id</code>, <code>scenario</code></td><td>Initial runner</td><td>Every node</td><td>Replace</td></tr>
+      <tr><td><code>incident_id</code>, <code>services</code>, <code>symptom</code>, <code>lab_run_id</code></td><td>Initial runner</td><td>Workflow nodes; scenario stays outside model input</td><td>Replace</td></tr>
       <tr><td><code>log_findings</code></td><td>Log Agent</td><td>Correlation, Report</td><td>Append reducer</td></tr>
       <tr><td><code>metrics_findings</code></td><td>Metrics Agent</td><td>Correlation, Report</td><td>Append reducer</td></tr>
       <tr><td><code>event_findings</code></td><td>Event Agent</td><td>Correlation, Report</td><td>Append reducer</td></tr>
@@ -15,19 +15,22 @@
       <tr><td><code>report_json</code>, <code>report_markdown</code></td><td>Report node</td><td>API/UI</td><td>Replace</td></tr>
       <tr><td><code>agent_steps</code></td><td>All specialist nodes</td><td>Checkpoint/audit state</td><td>Append reducer</td></tr>
     </tbody></table></div></section>
-    <section><h2>Investigation lifecycle</h2><p><span class="tag">investigating</span> <span class="tag">awaiting_approval</span> <span class="tag">completed</span> <span class="tag">completed_with_rejection</span> <span class="tag">cancelled</span> <span class="tag">failed</span></p><p class="small">The graph state, Investigation document, Approval document, and individual agent records each have related but separate status fields.</p></section>
+    <section><h2>Investigation lifecycle</h2><p><span class="tag">investigating</span> <span class="tag">awaiting_approval</span> <span class="tag">completed</span> <span class="tag">completed_with_rejection</span> <span class="tag">inconclusive</span> <span class="tag">remediation_failed</span> <span class="tag">cancelled</span> <span class="tag">failed</span></p><p class="small">The graph state, Investigation document, Approval document, and individual agent records each have related but separate status fields.</p></section>
     <section><h2>HTTP routes</h2><div class="table-wrap"><table class="data-table"><thead><tr><th>Method/path</th><th>Purpose</th><th>Important contract</th></tr></thead><tbody>
-      <tr><td><code>POST /simulate/{scenario}</code></td><td>Enable failure and create/start Investigation</td><td>202; 409 for same active Scenario</td></tr>
+      <tr><td><code>POST /lab/runs</code></td><td>Inject a bounded real fault and create/start Investigation</td><td>202; one atomic active-run lease</td></tr>
+      <tr><td><code>POST /investigations</code></td><td>Investigate supplied symptoms without injecting a fault</td><td>Validated service scope and time window</td></tr>
       <tr><td><code>GET /investigations</code></td><td>List newest first</td><td>Adds public <code>investigation_id</code> alias</td></tr>
-      <tr><td><code>GET /investigation/{id}</code></td><td>Read aggregate detail</td><td>Joins record, agent states, approvals</td></tr>
+      <tr><td><code>GET /investigation/{id}</code></td><td>Read aggregate detail</td><td>Joins record, agent states, approvals, questions</td></tr>
+      <tr><td><code>POST /investigation/{id}/questions</code></td><td>Ask Groq about current evidence</td><td>201; citations are restricted to finding IDs</td></tr>
       <tr><td><code>POST /investigation/{id}/cancel</code></td><td>Cancel tracked initial task</td><td>Marks terminal <code>cancelled</code></td></tr>
       <tr><td><code>GET /approvals</code></td><td>List approvals</td><td>Optional in-process status filter</td></tr>
       <tr><td><code>GET /approvals/{id}</code></td><td>Read one Approval</td><td>404 when absent</td></tr>
       <tr><td><code>POST /investigation/{id}/approval/{approval_id}</code></td><td>Queue checkpoint resume</td><td>Returns before resume finishes</td></tr>
       <tr><td><code>GET /stream/investigation/{id}</code></td><td>Stream live events</td><td>SSE; 15-second keep-alive</td></tr>
-      <tr><td><code>GET /system/status</code></td><td>Probe local dependencies</td><td>Some statuses are inferred</td></tr>
-      <tr><td><code>POST /system/recover</code></td><td>Disable every failure mode</td><td>Succeeds if any recovery call succeeds</td></tr>
-      <tr><td><code>GET/POST /settings</code></td><td>Read/change LLM provider</td><td>Never echoes submitted secret</td></tr>
+      <tr><td><code>GET /system/status</code></td><td>Probe local dependencies</td><td>Reports direct checks and explicit model configuration</td></tr>
+      <tr><td><code>GET /lab/runs/{id}</code></td><td>Read operator injection/cleanup audit</td><td>Never exposed as an agent evidence tool</td></tr>
+      <tr><td><code>POST /lab/runs/{id}/cleanup</code></td><td>Reconcile one bounded run</td><td>Recorded separately from agent remediation</td></tr>
+      <tr><td><code>POST /system/recover</code></td><td>Reconcile known lab runs</td><td>Refuses while a current investigation is active</td></tr>
     </tbody></table></div></section>
   </main>
   <footer class="footer"><a href="../lessons/index.html">Course index</a> · Pair with Lessons <a href="../lessons/0003-read-incident-state.html">3</a>, <a href="../lessons/0008-separate-three-state-systems.html">8</a>, and <a href="../lessons/0009-walk-the-api.html">9</a>. Ask your teaching agent to quiz you on any row.</footer>
