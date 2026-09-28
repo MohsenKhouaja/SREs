@@ -101,6 +101,36 @@ def test_classic_prepared_image_keeps_config_digest():
     assert operations._image_id('prepared:v1') == 'sha256:classic'
 
 
+def test_release_swap_preserves_compose_discovery_labels_and_updates_image():
+    current = FakeContainer(container_id="api-old", running=True)
+    current.name = "sres-sample-api-1"
+    current.attrs["Config"]["Labels"] = {
+        "com.docker.compose.config-hash": "original-config-hash",
+        "com.docker.compose.version": "5.5.0",
+        "com.docker.compose.image": "sha256:v1-index",
+    }
+    current.stop = lambda **kwargs: None
+    current.rename = lambda name: None
+    current.remove = lambda: None
+    replacement = FakeContainer(container_id="api-new")
+    operations = docker_ops(current)
+    operations.settings = SimpleNamespace(**vars(operations.settings), sample_api_publish_port=False, sample_api_redis_url="redis://redis", sample_api_postgres_url="postgresql://postgres", sample_api_loki_url="http://loki")
+    operations._image_id = lambda _image: "sha256:v2-manifest"
+    operations.client.images = SimpleNamespace(get=lambda _image: SimpleNamespace(id="sha256:v2-index"))
+    captured = {}
+
+    def create(image, **kwargs):
+        captured.update(kwargs)
+        return replacement
+
+    operations.client.containers.create = create
+    operations.client.networks = SimpleNamespace(get=lambda _name: SimpleNamespace(connect=lambda *args, **kwargs: None))
+    operations._replace_sample_api("api-old", "prepared:v2")
+    assert captured["labels"]["com.docker.compose.config-hash"] == "original-config-hash"
+    assert captured["labels"]["com.docker.compose.image"] == "sha256:v2-index"
+    assert captured["labels"]["com.docker.compose.service"] == "sample-api"
+
+
 @pytest.mark.parametrize("database", ["incident_db", "sres_production"])
 async def test_database_termination_revalidates_pid_start_and_scope(monkeypatch, database):
     start = datetime(2026, 9, 22, tzinfo=timezone.utc)

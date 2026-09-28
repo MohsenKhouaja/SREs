@@ -137,6 +137,15 @@ class DockerOperations:
         if before["image_id"] == target_image_id:
             raise StaleResource("Requested image is already running")
         network = self.client.networks.get(self.settings.sample_api_network)
+        labels = {
+            **current.attrs.get("Config", {}).get("Labels", {}),
+            "com.docker.compose.project": self.settings.compose_project,
+            "com.docker.compose.service": self.settings.sample_api_service,
+            "com.docker.compose.container-number": "1",
+            "com.docker.compose.oneoff": "False",
+            "com.docker.compose.image": self.client.images.get(image).id,
+            "sres.lab.managed": "true",
+        }
         name = current.name
         current.stop(timeout=10)
         backup_name = f"{name}-previous-{current.id[:8]}"
@@ -154,13 +163,7 @@ class DockerOperations:
                     "POSTGRES_URL": self.settings.sample_api_postgres_url,
                     "LOKI_URL": self.settings.sample_api_loki_url,
                 },
-                labels={
-                    "com.docker.compose.project": self.settings.compose_project,
-                    "com.docker.compose.service": self.settings.sample_api_service,
-                    "com.docker.compose.container-number": "1",
-                    "com.docker.compose.oneoff": "False",
-                    "sres.lab.managed": "true",
-                },
+                labels=labels,
                 ports={"8001/tcp": ("127.0.0.1", self.settings.sample_api_port)} if self.settings.sample_api_publish_port else None,
                 healthcheck={
                     "test": ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/live', timeout=3)"],
