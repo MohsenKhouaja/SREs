@@ -1,5 +1,5 @@
 import useSWR from "swr";
-import type {Approval, Investigation} from "./types";
+import type {Approval, Investigation, LabRun} from "./types";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || "/api";
 
@@ -31,6 +31,10 @@ export function useApprovals() {
 
 export function useApproval(id?: string) {
   return useSWR<Approval>(id ? `/approvals/${id}` : null, fetcher, {refreshInterval: 2500});
+}
+
+export function useLabRun(id?: string | null) {
+  return useSWR<LabRun>(id ? `/lab/runs/${id}` : null, fetcher, {refreshInterval: 4000});
 }
 
 export function formatScenario(scenario: string): string {

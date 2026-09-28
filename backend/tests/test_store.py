@@ -13,3 +13,13 @@ async def test_in_memory_store_keeps_agents_isolated_and_lists_newest_first():
     agents = await store.list_agent_states("one")
     assert {agent["agent_name"] for agent in agents} == {"log", "metrics"}
     assert next(agent for agent in agents if agent["agent_name"] == "log")["findings"][0]["message"] == "log"
+
+
+async def test_in_memory_store_persists_questions_in_order():
+    store = InMemoryStore()
+    await store.create_question({"question_id": "one", "investigation_id": "inv", "created_at": utc_now(), "question": "First"})
+    await store.create_question({"question_id": "two", "investigation_id": "inv", "created_at": utc_now(), "question": "Second"})
+
+    questions = await store.list_questions("inv")
+
+    assert [item["question"] for item in questions] == ["First", "Second"]

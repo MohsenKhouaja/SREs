@@ -20,7 +20,7 @@ export function JournalIndex({items, usingSamples}: {items: Investigation[]; usi
     <header className="prototype-masthead">
       <div><span>Investigations</span><span>{usingSamples ? "Sample edition" : `${items.length} in the archive`}</span></div>
       <h1>The incident record.</h1>
-      <div className="prototype-intro"><p>A clear account of every signal, conclusion, and human decision.</p><Link className="button prototype-primary" href="/simulate"><Plus size={15} />New investigation</Link></div>
+      <div className="prototype-intro"><p>A clear account of every signal, conclusion, and human decision.</p><Link className="button prototype-primary" href="/lab"><Plus size={15} />New investigation</Link></div>
     </header>
 
     <section className="journal-lead" aria-labelledby="journal-lead-title">
@@ -52,7 +52,7 @@ export function FocusedBriefing({items, usingSamples}: {items: Investigation[]; 
   return <div className="editorial-prototype variant-briefing">
     <header className="briefing-header">
       <div><h1>Good morning.</h1><p>Here is what needs your attention across the incident workspace.</p></div>
-      <Link className="button prototype-primary" href="/simulate"><Plus size={15} />Start investigation</Link>
+      <Link className="button prototype-primary" href="/lab"><Plus size={15} />Start investigation</Link>
     </header>
 
     <div className="briefing-layout">
@@ -89,7 +89,7 @@ export function FocusedBriefing({items, usingSamples}: {items: Investigation[]; 
 export function EvidenceDesk({items, usingSamples}: {items: Investigation[]; usingSamples: boolean}) {
   const selected = items[0];
   return <div className="editorial-prototype variant-desk">
-    <header className="desk-header"><div><h1>Investigation desk</h1><p>Evidence, decisions, and reports in one continuous record.</p></div><Link className="button prototype-primary" href="/simulate"><Plus size={15} />New</Link></header>
+    <header className="desk-header"><div><h1>Investigation desk</h1><p>Evidence, decisions, and reports in one continuous record.</p></div><Link className="button prototype-primary" href="/lab"><Plus size={15} />New</Link></header>
     <div className="desk-layout">
       <section className="desk-index" aria-labelledby="desk-index-title">
         <div className="desk-index-heading"><h2 id="desk-index-title">Case index</h2><span>{usingSamples ? "Preview" : `${items.length} total`}</span></div>

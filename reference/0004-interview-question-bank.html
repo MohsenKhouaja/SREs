@@ -17,11 +17,11 @@
       <div class="question"><strong>Could this be a conventional workflow?</strong><p>Yes; explain why explicit state, checkpoints, branches, and observability still fit graph orchestration.</p></div>
     </section>
     <section><h2>Evidence and AI</h2>
-      <div class="question"><strong>Is the root cause really AI-generated?</strong><p>Not necessarily. Deterministic profiles and heuristic tools work without a key; the LLM refines one sentence.</p></div>
-      <div class="question"><strong>Which evidence is real and which is synthetic?</strong><p>Loki/Prometheus query generated telemetry; Event Agent creates a two-event in-process timeline.</p></div>
-      <div class="question"><strong>How are hypotheses ranked?</strong><p>Textual term overlap with serialized evidence, starting at .35 and adding .16 per match.</p></div>
-      <div class="question"><strong>What happens when Loki is unavailable?</strong><p>The tool returns structured error data; the collector still creates a profile-worded Finding.</p></div>
-      <div class="question"><strong>What can the LLM change?</strong><p>Only root-cause wording; not graph topology, approval, targets, payloads, or execution.</p></div>
+      <div class="question"><strong>Is the root cause really AI-generated?</strong><p>Yes. Groq receives collected Evidence, generates competing hypotheses, cites Finding IDs, and selects the most supported explanation. No model means no investigation.</p></div>
+      <div class="question"><strong>Which evidence is measured and which part is controlled?</strong><p>The fault activation is an explicit lab control. Loki entries, Prometheus samples, request durations, response statuses, and event timestamps are observations produced by real request handling.</p></div>
+      <div class="question"><strong>How are hypotheses ranked?</strong><p>The correlation model compares hypotheses against the collected Findings and must return supporting Finding IDs plus limitations; the application validates every citation.</p></div>
+      <div class="question"><strong>What happens when Loki is unavailable?</strong><p>The evidence tool returns an error envelope, the runtime rejects the missing required Evidence, and the investigation fails visibly instead of emitting a canned Finding.</p></div>
+      <div class="question"><strong>What can the LLM change?</strong><p>It chooses tools within each bounded specialist, writes Findings, correlates hypotheses, and proposes an action from an allowlist. Code still owns graph topology, approval authority, HTTP payloads, execution, and verification.</p></div>
     </section>
     <section><h2>Safety and state</h2>
       <div class="question"><strong>Why is the interrupt node pure?</strong><p>Resume re-enters the node; placing writes/actions afterward avoids duplicate side effects on replay.</p></div>
@@ -34,15 +34,15 @@
       <div class="question"><strong>Why use polling and SSE together?</strong><p>Polling refreshes durable aggregate state; SSE gives low-latency activity events.</p></div>
       <div class="question"><strong>How are dependencies injected for tests?</strong><p><code>create_app</code> accepts Settings and Store; lifespan selects in-memory checkpointing.</p></div>
       <div class="question"><strong>How are secrets handled?</strong><p>POST accepts a key into process memory; responses expose only a configured boolean, not the value.</p></div>
-      <div class="question"><strong>How does the UI reflect product stages?</strong><p>Separate Simulate, Investigation, Approval, and Report routes preserve one narrative.</p></div>
+      <div class="question"><strong>How does the UI reflect product stages?</strong><p>Separate Incident Lab, Investigation, Approval, and Report routes preserve one narrative.</p></div>
     </section>
     <section><h2>Testing and critique</h2>
       <div class="question"><strong>What does the workflow test prove?</strong><p>Fan-out completion, pending Approval, checkpoint resume, rejection terminal state, and no need for external services.</p></div>
-      <div class="question"><strong>What important behavior is untested?</strong><p>Real Compose integration, SSE replay/disconnects, concurrent decisions, approved remediation, restart recovery, model providers.</p></div>
+      <div class="question"><strong>What important behavior is untested?</strong><p>SSE reconnects, concurrent decisions, restart recovery, multiple backend replicas, and real provider behavior under rate limiting.</p></div>
       <div class="question"><strong>Name the highest-risk race.</strong><p>Two decision requests can both observe pending before asynchronous resume persists the first decision.</p></div>
       <div class="question"><strong>What would break at multiple backend replicas?</strong><p>Process-local tasks/EventHub and uncoordinated duplicate checks; clients may connect to another replica.</p></div>
-      <div class="question"><strong>What is misleading about completed remediation?</strong><p>Execution errors are captured, but Report still marks the Investigation completed without post-action verification.</p></div>
-      <div class="question"><strong>What would you improve first?</strong><p>Auth and atomic decision claiming, durable job recovery, verified remediation, evidence validity, then scalable event delivery.</p></div>
+      <div class="question"><strong>How is completed remediation justified?</strong><p>After the allowlisted action succeeds, request-path probes must pass for every affected service; otherwise the Investigation becomes <code>remediation_failed</code>.</p></div>
+      <div class="question"><strong>What would you improve first?</strong><p>Auth and atomic decision claiming, durable job recovery, then scalable event delivery and broader end-to-end coverage.</p></div>
       <div class="question"><strong>How would you productionize safely?</strong><p>Keep human policy, add identity/RBAC/audit, idempotency, leases, durable queues, bounded events, verification, and real integrations.</p></div>
     </section>
   </main>

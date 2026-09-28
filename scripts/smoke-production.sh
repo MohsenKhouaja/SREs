@@ -14,12 +14,10 @@ check_production() {
     || return 1
 
   curl --fail --silent --show-error --max-time 15 "${base_url}/api/system/status" \
-    | python3 -c 'import json, sys; data=json.load(sys.stdin); required=("mongodb", "postgres", "redis", "prometheus", "loki", "sample_api", "sample_payment"); assert all(data.get(name) == "healthy" for name in required), data' \
+    | python3 -c 'import json, sys; data=json.load(sys.stdin); required=("mongodb", "postgres", "redis", "prometheus", "loki", "sample_api", "sample_payment", "lab_controller"); assert all(data.get(name) == "healthy" for name in required), data; assert data.get("llm") == "configured", data' \
     || return 1
 
-  curl --fail --silent --show-error --max-time 15 "${base_url}/api/settings/llm" \
-    | python3 -c 'import json, sys; data=json.load(sys.stdin); assert data.get("llm_provider") == "groq", data; assert data.get("api_key_configured") is True, data; assert data.get("groq_model") == "openai/gpt-oss-120b", data; assert data.get("groq_reasoning_effort") == "low", data' \
-    || return 1
+  curl --fail --silent --show-error --max-time 15 "${base_url}/lab" >/dev/null || return 1
 
   local redirect_headers
   redirect_headers="$(curl --silent --show-error --max-time 15 --dump-header - --output /dev/null "${www_url}/")" || return 1

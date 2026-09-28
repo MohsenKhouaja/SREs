@@ -17,6 +17,8 @@ RUN groupadd --system --gid 10001 sres \
     && useradd --system --uid 10001 --gid sres --home-dir /app --shell /usr/sbin/nologin sres
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=sres:sres app.py .
+ARG RELEASE=v1
+COPY --chown=sres:sres releases/${RELEASE}/products.py ./release_behavior.py
 USER sres
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
     CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8001') + '/health', timeout=3)"]

@@ -26,7 +26,7 @@ Avoid developer-tool density for its own sake, gamer-style operations consoles, 
 - Edit information aggressively: hierarchy and whitespace should make the critical signal obvious at a glance.
 - Treat evidence as a first-class artifact—timestamped, sourceable, and readable without visual noise.
 - Use premium craft sparingly: abstract art and polished materials may frame a moment, never compete with operational work.
-- Keep simulation, investigation, approval, and report stages visibly distinct while preserving one continuous narrative.
+- Keep fault injection, investigation, approval, operation, verification, and report stages visibly distinct while preserving one continuous narrative.
 
 ## Accessibility & Inclusion
 

@@ -1,47 +1,57 @@
-name: sres
+name: ${COMPOSE_PROJECT_NAME:-sres}
 
 services:
   backend:
     build: ./backend
-    ports: ["${BACKEND_HOST_PORT:-8000}:8000"]
+    # The backend needs direct host networking so Groq remains reachable on
+    # IPv6-only host connections. The observability services stay isolated on
+    # the project bridge and are reached through their published host ports.
+    network_mode: host
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LLM_PROVIDER: ${LLM_PROVIDER:-deterministic}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+      GROQ_MAX_TOKENS: ${GROQ_MAX_TOKENS:-1024}
+      GROQ_SERVICE_TIER: ${GROQ_SERVICE_TIER:-on_demand}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-sres-incident-response}
-      MONGODB_URL: mongodb://mongodb:27017
+      MONGODB_URL: mongodb://127.0.0.1:${MONGODB_HOST_PORT:-27017}
       MONGODB_DATABASE: incident_response
-      PROMETHEUS_URL: http://prometheus:9090
-      LOKI_URL: http://loki:3100
-      SAMPLE_API_URL: http://sample-api:8001
-      SAMPLE_PAYMENT_URL: http://sample-payment:8002
-      SIMULATION_WARMUP_SECONDS: ${SIMULATION_WARMUP_SECONDS:-10}
+      PROMETHEUS_URL: http://127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}
+      LOKI_URL: http://127.0.0.1:${LOKI_HOST_PORT:-3100}
+      SAMPLE_API_URL: http://127.0.0.1:${SAMPLE_API_HOST_PORT:-8001}
+      SAMPLE_PAYMENT_URL: http://127.0.0.1:${SAMPLE_PAYMENT_HOST_PORT:-8002}
+      LAB_CONTROLLER_URL: http://127.0.0.1:8010
+      LAB_MONITOR_TOKEN: ${LAB_MONITOR_TOKEN:?set LAB_MONITOR_TOKEN in .env}
+      LAB_OPERATOR_TOKEN: ${LAB_OPERATOR_TOKEN:?set LAB_OPERATOR_TOKEN in .env}
+      INVESTIGATION_WARMUP_SECONDS: ${INVESTIGATION_WARMUP_SECONDS:-10}
+      VERIFICATION_ROUNDS: ${VERIFICATION_ROUNDS:-3}
+      VERIFICATION_INTERVAL_SECONDS: ${VERIFICATION_INTERVAL_SECONDS:-5}
+      VERIFICATION_TIMEOUT_SECONDS: ${VERIFICATION_TIMEOUT_SECONDS:-60}
     depends_on:
       mongodb: {condition: service_healthy}
       prometheus: {condition: service_healthy}
       loki: {condition: service_healthy}
       sample-api: {condition: service_healthy}
       sample-payment: {condition: service_healthy}
+      lab-controller: {condition: service_healthy}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # Probe HTTP until readiness is proven once. Afterwards Docker verifies
+      # that the Uvicorn process still exists without generating access logs.
+      test: ["CMD-SHELL", "if [ -f /tmp/sres-backend-ready ]; then kill -0 1; else curl -f http://localhost:8000/health && touch /tmp/sres-backend-ready; fi"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 20s
-    networks: [incident-response-net]
 
   frontend:
     build:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8000
-    ports: ["${FRONTEND_HOST_PORT:-3000}:3000"]
+    ports: ["${FRONTEND_HOST_PORT:-3001}:3000"]
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
     depends_on:
@@ -53,6 +63,32 @@ services:
       retries: 5
       start_period: 20s
     networks: [incident-response-net]
+
+  lab-controller:
+    build: ./lab-controller
+    network_mode: host
+    environment:
+      MONGODB_URL: mongodb://127.0.0.1:${MONGODB_HOST_PORT:-27017}
+      MONGODB_DATABASE: sres_lab_control
+      MONITOR_TOKEN: ${LAB_MONITOR_TOKEN:?set LAB_MONITOR_TOKEN in .env}
+      OPERATOR_TOKEN: ${LAB_OPERATOR_TOKEN:?set LAB_OPERATOR_TOKEN in .env}
+      COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-sres}
+      SAMPLE_API_PORT: ${SAMPLE_API_HOST_PORT:-8001}
+      SAMPLE_API_NETWORK: ${COMPOSE_PROJECT_NAME:-sres}_incident-response-net
+      POSTGRES_URL: postgresql://lab_controller:lab_controller@127.0.0.1:${POSTGRES_HOST_PORT:-5432}/incident_db
+      SAMPLE_API_V1_IMAGE: sres-sample-api:v1
+      SAMPLE_API_V2_IMAGE: sres-sample-api:v2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mongodb: {condition: service_healthy}
+      postgres-bootstrap: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8010/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   prometheus:
     image: prom/prometheus:latest
@@ -116,6 +152,18 @@ services:
       start_period: 15s
     networks: [incident-response-net]
 
+  postgres-bootstrap:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./postgres/bootstrap.sql:/bootstrap.sql:ro
+    command: ["psql", "-h", "postgres", "-U", "postgres", "-d", "incident_db", "-v", "ON_ERROR_STOP=1", "-f", "/bootstrap.sql"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+    networks: [incident-response-net]
+
   mongodb:
     image: mongo:7
     ports: ["${MONGODB_HOST_PORT:-27017}:27017"]
@@ -130,20 +178,23 @@ services:
     networks: [incident-response-net]
 
   sample-api:
-    build: ./sample-apps
+    image: sres-sample-api:v1
+    build:
+      context: ./sample-apps
+      args: {RELEASE: v1}
     ports: ["${SAMPLE_API_HOST_PORT:-8001}:8001"]
     environment:
       SERVICE_KIND: api
       PORT: 8001
       REDIS_URL: redis://redis:6379
-      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/incident_db
+      POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/incident_db
       LOKI_URL: http://loki:3100
     depends_on:
       redis: {condition: service_healthy}
-      postgres: {condition: service_healthy}
+      postgres-bootstrap: {condition: service_completed_successfully}
       loki: {condition: service_healthy}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8001/live"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -151,7 +202,10 @@ services:
     networks: [incident-response-net]
 
   sample-payment:
-    build: ./sample-apps
+    image: sres-sample-payment:v1
+    build:
+      context: ./sample-apps
+      args: {RELEASE: v1}
     ports: ["${SAMPLE_PAYMENT_HOST_PORT:-8002}:8002"]
     environment:
       SERVICE_KIND: payment
@@ -164,7 +218,7 @@ services:
       postgres: {condition: service_healthy}
       loki: {condition: service_healthy}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8002/live"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -179,4 +233,3 @@ volumes:
 
 networks:
   incident-response-net:
-    name: incident-response-net
