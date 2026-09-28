@@ -9,7 +9,7 @@ BEGIN
 END
 $$;
 
-GRANT CONNECT ON DATABASE incident_db TO app_user, lab_controller;
+SELECT format('GRANT CONNECT ON DATABASE %I TO app_user, lab_controller', current_database()) \gexec
 GRANT USAGE ON SCHEMA public TO app_user, lab_controller;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;

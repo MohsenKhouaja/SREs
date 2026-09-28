@@ -11,7 +11,7 @@ generated secrets in the existing Dokploy application's environment:
 - `LAB_OPERATOR_TOKEN`: private controller mutation credential.
 
 Retain the existing Groq, authenticated MongoDB, and PostgreSQL environment
-values. The PostgreSQL database must remain `incident_db`. The migration runs
+values, including the existing `POSTGRES_DB`. The migration runs
 against existing volumes and grants the sample application and lab controller
 their restricted database roles.
 

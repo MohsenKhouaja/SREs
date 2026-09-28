@@ -44,8 +44,8 @@ class PostgresOperations:
             row = await connection.fetchrow("SELECT pg_backend_pid() AS pid, backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()")
             self._lock_connections[run_id] = connection
             return {
-                "resource_id": "postgres:incident_db",
-                "database": "incident_db",
+                "resource_id": f"postgres:{self.settings.postgres_database}",
+                "database": self.settings.postgres_database,
                 "pid": row["pid"],
                 "backend_start": row["backend_start"].isoformat(),
                 "observed_at": utc_iso(),
@@ -61,10 +61,10 @@ class PostgresOperations:
             return [
                 {
                     **dict(row),
-                    "resource_id": "postgres:incident_db",
+                    "resource_id": f"postgres:{self.settings.postgres_database}",
                     "backend_start": row["backend_start"].isoformat(),
                     "observation_id": f"postgres-blocker:{row['pid']}:{row['backend_start'].isoformat()}",
-                    "database": "incident_db",
+                    "database": self.settings.postgres_database,
                     "observed_at": utc_iso(),
                 }
                 for row in rows
@@ -73,7 +73,7 @@ class PostgresOperations:
             await connection.close()
 
     async def terminate_blocker(self, database: str, pid: int, backend_start: str) -> dict[str, Any]:
-        if database != "incident_db":
+        if database != self.settings.postgres_database:
             raise ValueError("Database is outside the lab allowlist")
         connection = await asyncpg.connect(self.settings.postgres_url, server_settings={"application_name": "sres-lab-operator"})
         try:

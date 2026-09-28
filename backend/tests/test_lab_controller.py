@@ -67,7 +67,8 @@ def test_release_swap_validates_network_before_stopping_current_container():
     assert container.status == "running"
 
 
-async def test_database_termination_revalidates_pid_start_and_scope(monkeypatch):
+@pytest.mark.parametrize("database", ["incident_db", "sres_production"])
+async def test_database_termination_revalidates_pid_start_and_scope(monkeypatch, database):
     start = datetime(2026, 9, 22, tzinfo=timezone.utc)
 
     class Connection:
@@ -84,8 +85,10 @@ async def test_database_termination_revalidates_pid_start_and_scope(monkeypatch)
         return Connection()
 
     monkeypatch.setattr("app.postgres_ops.asyncpg.connect", connect)
-    operations = PostgresOperations(SimpleNamespace(postgres_url="postgresql://lab"))
-    result = await operations.terminate_blocker("incident_db", 42, start.isoformat())
+    operations = PostgresOperations(SimpleNamespace(postgres_url="postgresql://lab", postgres_database=database))
+    result = await operations.terminate_blocker(database, 42, start.isoformat())
     assert result["after"]["terminated"] is True
     with pytest.raises(StaleResource):
-        await operations.terminate_blocker("incident_db", 42, "2026-09-21T00:00:00+00:00")
+        await operations.terminate_blocker(database, 42, "2026-09-21T00:00:00+00:00")
+    with pytest.raises(ValueError, match="allowlist"):
+        await operations.terminate_blocker("unrelated_database", 42, start.isoformat())

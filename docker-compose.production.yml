@@ -66,6 +66,7 @@ services:
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
       SAMPLE_API_URL: ${SAMPLE_API_URL:-http://sample-api:8001}
       SAMPLE_PAYMENT_URL: ${SAMPLE_PAYMENT_URL:-http://sample-payment:8002}
+      SAMPLE_DATABASE_NAME: ${POSTGRES_DB:-incident_db}
       INVESTIGATION_WARMUP_SECONDS: ${INVESTIGATION_WARMUP_SECONDS:-10}
       LAB_CONTROLLER_URL: http://lab-controller:8010
       LAB_MONITOR_TOKEN: ${LAB_MONITOR_TOKEN:?LAB_MONITOR_TOKEN is required}
@@ -242,7 +243,7 @@ services:
       SERVICE_KIND: api
       PORT: "8001"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/incident_db
+      POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/${POSTGRES_DB:-incident_db}
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
     expose:
       - "8001"
@@ -271,7 +272,7 @@ services:
       SERVICE_KIND: payment
       PORT: "8002"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/incident_db
+      POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/${POSTGRES_DB:-incident_db}
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
     expose:
       - "8002"
@@ -315,8 +316,9 @@ services:
       SAMPLE_API_V1_IMAGE: sres-trysres-sample-api:v1
       SAMPLE_API_V2_IMAGE: sres-trysres-sample-api:v2
       SAMPLE_API_PUBLISH_PORT: "false"
-      POSTGRES_URL: postgresql://lab_controller:lab_controller@postgres:5432/incident_db
-      SAMPLE_API_POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/incident_db
+      POSTGRES_URL: postgresql://lab_controller:lab_controller@postgres:5432/${POSTGRES_DB:-incident_db}
+      POSTGRES_DATABASE: ${POSTGRES_DB:-incident_db}
+      SAMPLE_API_POSTGRES_URL: postgresql://app_user:app_user@postgres:5432/${POSTGRES_DB:-incident_db}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

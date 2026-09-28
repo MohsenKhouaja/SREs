@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     loki_url: str = "http://localhost:3100"
     sample_api_url: str = "http://localhost:8001"
     sample_payment_url: str = "http://localhost:8002"
+    sample_database_name: str = "incident_db"
     lab_controller_url: str = "http://127.0.0.1:8010"
     lab_monitor_token: str = ""
     lab_operator_token: str = ""
